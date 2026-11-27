@@ -1,3 +1,7 @@
+import { goalObjectiveId } from "./goal-objective-id.ts";
+
+export { goalObjectiveId, isGoalObjectiveId } from "./goal-objective-id.ts";
+
 import { type BackgroundToolTaskRef, collectCitedRunningToolTaskIds } from "../background-tool-task-controller.ts";
 import { getTrustedRequirementEvidence } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
@@ -8,6 +12,8 @@ import {
 } from "../tasks/task-projection.ts";
 import type { TaskStepsState } from "../tasks/task-state.ts";
 import type { AcceptanceCriterion, EvidenceContract } from "./contracts.ts";
+import { isGoalEvidenceMirror, projectGoalCoverageRecord } from "./goal-evidence-mirror.ts";
+import { goalObjectiveRequirementDescription } from "./goal-objective-description.ts";
 import type { CreateObjectiveInput, TaskRuntimeProjection } from "./task-runtime.ts";
 
 export interface GoalObjectiveProjection extends CreateObjectiveInput {
@@ -32,16 +38,6 @@ export interface SessionWorkStateProjection {
 	runningToolTaskIds: readonly string[];
 }
 
-const GOAL_OBJECTIVE_PREFIX = "goal:";
-
-export function goalObjectiveId(goalId: string): string {
-	return `${GOAL_OBJECTIVE_PREFIX}${goalId}`;
-}
-
-export function isGoalObjectiveId(objectiveId: string): boolean {
-	return objectiveId.startsWith(GOAL_OBJECTIVE_PREFIX);
-}
-
 export function projectGoalObjective(goal: GoalState): GoalObjectiveProjection {
 	return {
 		objectiveId: goalObjectiveId(goal.goalId),
@@ -50,47 +46,24 @@ export function projectGoalObjective(goal: GoalState): GoalObjectiveProjection {
 		constraints: [],
 		acceptanceCriteria: goal.requirements.map((requirement) => ({
 			id: requirement.id,
-			description: requirement.text,
+			description: goalObjectiveRequirementDescription(requirement),
 			required: true,
 		})),
 		riskBudget: goal.tokenBudget !== undefined ? { maxTokens: goal.tokenBudget } : {},
 	};
 }
 
-function orchestrationEvidenceKind(kind: GoalState["evidence"][number]["kind"]): EvidenceContract["kind"] {
-	switch (kind) {
-		case "test":
-			return "test";
-		case "tool":
-		case "check":
-			return "command";
-		case "worker":
-			return "review";
-		case "user":
-			return "external";
-		case "file":
-		case "finding":
-			return "observation";
-	}
-}
-
-export function projectGoalAcceptanceEvidence(goal: GoalState): EvidenceContract[] {
-	return goal.requirements.flatMap((requirement) =>
-		getTrustedRequirementEvidence(goal, requirement).map((evidence) => ({
-			evidenceId: `goal-evidence:${goal.goalId}:${requirement.id}:${evidence.id}`,
-			criterionId: requirement.id,
-			kind: orchestrationEvidenceKind(evidence.kind),
-			summary: evidence.summary,
-			artifactIds: [],
-			trusted: true,
-			createdAt: evidence.createdAt,
-			metadata: {
-				sourceGoalEvidenceId: evidence.id,
-				sourceKind: evidence.kind,
-				...(evidence.uri ? { uri: evidence.uri } : {}),
-			},
-		})),
+export function projectGoalAcceptanceEvidence(
+	goal: GoalState,
+	retained: readonly EvidenceContract[] = [],
+): EvidenceContract[] {
+	const occupied = new Set(
+		retained.filter((item) => !isGoalEvidenceMirror(item, goal.goalId)).map((item) => item.evidenceId),
 	);
+	return goal.requirements.flatMap((requirement) => {
+		const citations = getTrustedRequirementEvidence(goal, requirement);
+		return citations.length === 0 ? [] : [projectGoalCoverageRecord(goal, requirement, citations, occupied)];
+	});
 }
 
 function collectRelatedDelegatedTaskIds(

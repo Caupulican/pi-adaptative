@@ -14,13 +14,14 @@ export const GATHERED_EVIDENCE_CUSTOM_TYPE = "gathered_evidence";
  * The atomic questions a retrieve route asks: one per requirement System One targeted, or the objective
  * itself when the route targets none.
  */
-export function gatheringQuestions(objective: string, targetRequirementIds: readonly string[]): string[] {
-	if (targetRequirementIds.length === 0) {
+export function gatheringQuestions(
+	objective: string,
+	requirements?: readonly { id: string; text: string }[],
+): string[] {
+	if (!requirements) {
 		return [`Gather what the repository shows that this objective needs: ${objective}`];
 	}
-	return targetRequirementIds.map(
-		(id) => `For requirement ${id} of this objective, gather what the repository shows about it: ${objective}`,
-	);
+	return requirements.map(({ id, text }) => `For requirement ${id}, gather what the repository shows about: ${text}`);
 }
 
 /** Instructions a minion runs with: read, report findings with where they came from, change nothing. */

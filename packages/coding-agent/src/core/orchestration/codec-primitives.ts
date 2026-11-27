@@ -5,6 +5,7 @@
  */
 
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
+import { parseBoundedStringArray } from "./bounded-string-array.ts";
 import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "./contracts.ts";
 import { DurableTaskRuntimeError } from "./task-runtime-state.ts";
 
@@ -27,6 +28,14 @@ export function dispatchIdentifier(value: unknown, label: string): string {
 		throw new DurableTaskRuntimeError(`${label} exceeds its durable size bound.`);
 	}
 	return identifier;
+}
+
+export function dispatchIdentifierArray(value: unknown, label: string): string[] {
+	return parseBoundedStringArray(value, {
+		invalidMessage: `${label} must be a bounded identifier array.`,
+		duplicateMessage: `${label} contains duplicates.`,
+		createError: (message) => new DurableTaskRuntimeError(message),
+	});
 }
 
 export function cancellationDetail(value: unknown, label: string): string {

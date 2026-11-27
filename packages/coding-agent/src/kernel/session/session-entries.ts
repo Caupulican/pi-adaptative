@@ -4,6 +4,8 @@ import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
 import type { UsageComponent } from "../usage-components.ts";
 import type { WorkerControlRecord } from "../worker-control-stamp.ts";
 
+export const GOAL_STATE_CUSTOM_TYPE = "goal_state";
+export const GOAL_OWNER_CORRECTION_CUSTOM_TYPE = "goal_owner_correction";
 export const QUEUED_INPUT_CUSTOM_TYPE = "queued_owner_input";
 
 export interface SessionEntryBase {

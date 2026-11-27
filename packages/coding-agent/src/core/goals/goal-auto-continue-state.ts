@@ -48,6 +48,7 @@ export interface GoalAutoContinueFacts {
 /** The state a goal's own decision settles by itself; `undefined`: the goal is still working and the live facts decide. */
 const DECIDED_BY_GOAL: Readonly<Record<GoalContinuationReasonCode, GoalAutoContinueState | undefined>> = {
 	missing_goal_state: "no_goal",
+	goal_identity_conflict: "owner_answer_needed",
 	goal_completed: "finished",
 	goal_cancelled: "finished",
 	goal_paused: "owner_paused",
@@ -58,6 +59,8 @@ const DECIDED_BY_GOAL: Readonly<Record<GoalContinuationReasonCode, GoalAutoConti
 	plan_in_flight: "waiting_for_worker",
 	tool_task_in_flight: "waiting_for_background_task",
 	watch_in_flight: "waiting_for_watch",
+	executor_admission_backoff: "waiting_for_worker",
+	executor_admission_exhausted: "owner_answer_needed",
 	goal_active: undefined,
 	goal_completion_required: undefined,
 	acceptance_evidence_required: undefined,

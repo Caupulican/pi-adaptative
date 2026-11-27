@@ -12,6 +12,8 @@ import { capturePublishedMessagePrefix, messageHistoryVersion } from "../kernel/
 import type { SessionManager, SessionRequestSnapshotInput } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import type { WorkerDelegationRunOutcome } from "./agent-session-contracts.ts";
+import type { LaneRecord } from "./autonomy/lane-tracker.ts";
+import { markToolFreeCacheRequest } from "./cache-trace.ts";
 import {
 	priceExecutor,
 	resolveEffectiveModelPricing,
@@ -39,9 +41,18 @@ import {
 	minionInstructions,
 } from "./minion-gathering.ts";
 import { sideTripBrief } from "./model-router/side-trip-brief.ts";
-import { assertCurrentGoalObjective } from "./objective-execution/current-objective-execution.ts";
-import type { ObjectiveRoute } from "./objective-execution/objective-route.ts";
+import {
+	assertCurrentGoalObjective,
+	ObjectiveExecutionInterruptedError,
+} from "./objective-execution/current-objective-execution.ts";
+import {
+	type ObjectiveRoute,
+	PENDING_WORKER_EXECUTOR,
+	type RetrievalDisposition,
+	workerRouteAdmission,
+} from "./objective-execution/objective-route.ts";
 import type { CacheDecisionRow, DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
+import type { ObjectiveContract } from "./orchestration/contracts.ts";
 import { latestRequestSnapshot } from "./request-snapshot-fingerprints.ts";
 import { MAX_DELEGATE_STATUS_OUTPUT_BYTES } from "./tools/delegate-status.ts";
 
@@ -61,8 +72,16 @@ export interface SessionCacheControllerDeps {
 	resetSanitizerPrefixHorizon(): void;
 	previewWorkerModel(): Model<Api> | undefined;
 	getGoalState(): GoalState | undefined;
-	executeObjectiveRootRoute(route: ObjectiveRoute, signal?: AbortSignal): Promise<unknown>;
-	runWorkerDelegationOnce(request: WorkerDelegationRequest): Promise<WorkerDelegationRunOutcome>;
+	getObjective(id: string): Pick<ObjectiveContract, "description" | "acceptanceCriteria"> | undefined;
+	executeObjectiveRootRoute(
+		route: ObjectiveRoute,
+		signal: AbortSignal | undefined,
+		submitted: () => void,
+	): Promise<unknown>;
+	runWorkerDelegationOnce(
+		request: WorkerDelegationRequest,
+		onStarted: (record: LaneRecord) => void,
+	): Promise<WorkerDelegationRunOutcome>;
 	sendNextTurnCustomMessage(
 		message: { customType: string; content: string; display: boolean },
 		assertCurrent: () => void,
@@ -96,6 +115,7 @@ export class SessionCacheController {
 		sourceBoundary,
 		sourceContext,
 	}: Pick<ProviderRequestSnapshotContext, "model" | "context" | "sourceBoundary" | "sourceContext">): void {
+		if (sourceContext.surfaceChange) markToolFreeCacheRequest(context);
 		const sessionManager = this.deps.getSessionManager();
 		const assertBranch = sessionManager.captureBranchContext();
 		const boundary = sourceBoundary ?? {
@@ -345,41 +365,84 @@ export class SessionCacheController {
 	 * for any route the root may take). Only accepted reports reach the talker, as one bounded evidence
 	 * record on its next turn.
 	 */
-	async retrieveForObjective(route: ObjectiveRoute, signal?: AbortSignal): Promise<"root" | "worker"> {
+	async retrieveForObjective(
+		route: ObjectiveRoute,
+		signal?: AbortSignal,
+		submitted?: (executor: "root" | "worker") => void,
+	): Promise<RetrievalDisposition> {
+		const sessionId = this.deps.getSessionId();
 		const goal = assertCurrentGoalObjective(route.objective_id, this.deps.getGoalState());
-		const objective = goal?.userGoal ?? route.objective_id;
-		const questions = gatheringQuestions(objective, route.target_requirement_ids ?? []);
-		const executor = this.chooseRetrieveExecutor(route, questions);
-		// Recorded before the route runs, so an interrupted route still teaches its request count.
-		this.deps.getDecisionLedger()?.noteRouteExecutor(this.deps.getSessionId(), route.cycle_id, executor);
-		if (executor === "root") {
-			await this.deps.executeObjectiveRootRoute(route, signal);
-			return "root";
-		}
-		const reports = await gatherWithMinions(questions, async (question) => {
+		const durable = goal ? undefined : this.deps.getObjective(route.objective_id);
+		const objective = goal?.userGoal ?? durable?.description ?? route.objective_id;
+		const requirements =
+			goal?.requirements ?? durable?.acceptanceCriteria.map(({ id, description }) => ({ id, text: description }));
+		const targets = route.target_requirement_ids && new Set(route.target_requirement_ids);
+		const questions = gatheringQuestions(
+			objective,
+			targets && (requirements ?? []).filter((item) => targets.has(item.id)),
+		);
+		const assertCurrent = () => {
 			signal?.throwIfAborted();
+			if (sessionId !== this.deps.getSessionId()) throw new ObjectiveExecutionInterruptedError("session_replaced");
 			assertCurrentGoalObjective(route.objective_id, this.deps.getGoalState());
-			const run = await this.deps.runWorkerDelegationOnce({
-				objectiveId: route.objective_id,
-				instructions: minionInstructions(question),
-				authority: { readOnly: true },
-				forkTurns: "none",
-				// Ordinary admission reuses a compatible idle specialist; each question is a new task,
-				// not authorization to allocate an independent copy of its retained session.
-			});
+		};
+		const noteExecutor =
+			submitted ??
+			((executor: "root" | "worker") =>
+				this.deps.getDecisionLedger()?.noteRouteExecutor(sessionId, route.cycle_id, executor, route.objective_id));
+		const runRoot = async () => {
+			assertCurrent();
+			await this.deps.executeObjectiveRootRoute(route, signal, () => noteExecutor("root"));
+			return "root" as const;
+		};
+		assertCurrent();
+		if (!questions.length || this.chooseRetrieveExecutor(route, questions) === "root") return runRoot();
+		let workerAdmitted = false;
+		let workerPending = false;
+		const admitWorker = () => {
+			if (!workerAdmitted) noteExecutor("worker");
+			workerAdmitted = true;
+		};
+		const reports = await gatherWithMinions(questions, async (question) => {
+			assertCurrent();
+			const run = await this.deps.runWorkerDelegationOnce(
+				{
+					objectiveId: route.objective_id,
+					objectiveRouteOrigin: {
+						sessionId,
+						objectiveId: route.objective_id,
+						cycleId: route.cycle_id,
+						executor: "worker",
+					},
+					instructions: minionInstructions(question),
+					authority: { readOnly: true },
+					forkTurns: "none",
+					assertReceiptAdmission: assertCurrent,
+					// Ordinary admission reuses a compatible idle specialist; each question is a new task,
+					// not authorization to allocate an independent copy of its retained session.
+				},
+				(record) => {
+					if (workerRouteAdmission({ record }).started) admitWorker();
+				},
+			);
+			const admission = workerRouteAdmission(run);
+			if (admission.started) admitWorker();
+			else if (admission.pending) workerPending = true;
+			assertCurrent();
 			if (!run.started || !run.outcome)
 				return { question, accepted: false, reason: run.skipReason ?? "not started" };
 			return run.outcome.accepted
 				? { question, accepted: true, summary: run.outcome.claim.summary }
 				: { question, accepted: false, reason: run.outcome.reasonCode };
 		});
+		if (!workerAdmitted) return workerPending ? PENDING_WORKER_EXECUTOR : runRoot();
 		await this.deps.sendNextTurnCustomMessage(
 			{
 				customType: GATHERED_EVIDENCE_CUSTOM_TYPE,
 				content: formatGatheredEvidence(reports, MAX_DELEGATE_STATUS_OUTPUT_BYTES),
 				display: true,
 			},
-			() => assertCurrentGoalObjective(route.objective_id, this.deps.getGoalState()),
+			assertCurrent,
 		);
 		return "worker";
 	}

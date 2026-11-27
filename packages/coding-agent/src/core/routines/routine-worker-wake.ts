@@ -5,6 +5,7 @@
  * session's other deliveries.
  */
 
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { workerRuntimeLive } from "./worker-watch-liveness.ts";
@@ -25,7 +26,12 @@ export type WorkerWake =
 /** What waking a runtime reads and asks of the worker runtime. */
 export interface WorkerWakeHost {
 	snapshot(): Pick<TaskRuntimeProjection, "agents" | "attempts">;
-	followUp(runtimeId: string, text: string, idempotencyKey: string): { messageId: string; skipReason?: string };
+	followUp(
+		runtimeId: string,
+		text: string,
+		idempotencyKey: string,
+		origin?: TurnOriginRecord,
+	): { messageId: string; skipReason?: string };
 }
 
 /** The line a session reads before a watch event its worker armed but could not take: the event is the session's to act on or pass on. */
@@ -49,10 +55,11 @@ export function wakeWorkerRuntime(
 	runtimeId: string,
 	text: string | undefined,
 	key: string,
+	origin?: TurnOriginRecord,
 ): WorkerWake {
 	if (text === undefined || !workerRuntimeLive(host.snapshot(), runtimeId)) return { kind: "void" };
 	try {
-		const sent = host.followUp(runtimeId, text, key);
+		const sent = host.followUp(runtimeId, text, key, origin);
 		// A message id means the message was accepted into the mailbox, even when starting its turn waits for capacity.
 		if (sent.messageId !== "") return { kind: "sent", messageId: sent.messageId };
 		return { kind: "refused", reason: sent.skipReason ?? "the runtime did not accept it" };

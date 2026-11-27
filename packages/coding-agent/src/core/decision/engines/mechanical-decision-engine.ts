@@ -84,14 +84,16 @@ export class MechanicalDecisionEngine implements SemanticDecisionEngine {
 					})
 				: []);
 
+		const correctedOutcomePending = rawObjective?.corrected_outcome_pending === true;
 		const allSatisfied =
-			criteria.length > 0
+			!correctedOutcomePending &&
+			(criteria.length > 0
 				? criteria.every((a) => !a.required || a.satisfied)
 				: rawRuntime
-					? (rawRuntime.ready_tasks?.length ?? 0) === 0 &&
+					? (rawRuntime.incomplete_task_count ?? rawRuntime.ready_tasks?.length ?? 0) === 0 &&
 						(rawRuntime.failed_retryable_tasks?.length ?? 0) === 0 &&
 						runningAttempts === 0
-					: (mechState.tasks?.length ?? 0) === 0 || mechState.tasks?.every((t) => t.status === "completed");
+					: (mechState.tasks?.length ?? 0) === 0 || mechState.tasks?.every((t) => t.status === "completed"));
 
 		for (const decision of program.decisions) {
 			if (decision.id === "__function__" && decision.kind === "choice") {
@@ -103,7 +105,7 @@ export class MechanicalDecisionEngine implements SemanticDecisionEngine {
 
 				if (allSatisfied) {
 					selectedFunc = "completion_candidate";
-				} else if (missingProof) {
+				} else if (missingProof || (correctedOutcomePending && !readyTask && !retryableTask)) {
 					selectedFunc = "run_verification";
 				} else if (retryableTask) {
 					selectedFunc = "replan";
@@ -142,7 +144,7 @@ export class MechanicalDecisionEngine implements SemanticDecisionEngine {
 
 					if (allSatisfied) {
 						selected = "none";
-					} else if (missingProof) {
+					} else if (missingProof || (correctedOutcomePending && !readyTask && !retryableTask)) {
 						selected = "verify";
 					} else if (retryableTask) {
 						selected = "replan";

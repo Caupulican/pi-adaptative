@@ -51,7 +51,7 @@ const ROUTE_BRIEFS: Readonly<Record<ObjectiveRoute["route"], string>> = {
  */
 export function buildObjectiveRoutePrompt(route: ObjectiveRoute): GoalContinuationPrompt {
 	const targets = route.target_requirement_ids?.length
-		? ` Target requirements: ${route.target_requirement_ids.join(", ")}.`
+		? ` Target requirements: ${route.target_requirement_ids.join(", ")}. Advance only this assigned scope and its declared prerequisites, and record coverage for each named requirement.`
 		: "";
 	const why = route.reason_codes.length ? ` (${route.reason_codes.join(", ")})` : "";
 	const repeatedSameLaneRecovery =

@@ -20,7 +20,7 @@ import {
 	renderContinuousChatNavigationResult,
 } from "./continuous-chat-navigation.ts";
 import {
-	CONTINUOUS_CHAT_TOOL_DEFINITIONS,
+	CONTINUOUS_CHAT_ZOOM_AGENT_DESCRIPTION,
 	CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION,
 } from "./continuous-chat-prompt.ts";
 import { memoryFailure } from "./history-tool.ts";
@@ -55,13 +55,6 @@ export type ContinuousChatNavigationToolName =
 	| typeof CONTINUOUS_CHAT_ZOOM_TOOL_NAME
 	| typeof CONTINUOUS_CHAT_DATE_TOOL_NAME;
 
-/** The description the stable prompt owns, so the tool text and the prompt cannot disagree. */
-function describeTool(name: ContinuousChatNavigationToolName): string {
-	const definition = CONTINUOUS_CHAT_TOOL_DEFINITIONS.find((candidate) => candidate.name === name);
-	if (definition === undefined) throw new Error(`Continuous-chat tool definition is missing: ${name}`);
-	return definition.description;
-}
-
 const ZOOM_N_PARAMETER = Type.Optional(
 	Type.Integer({ minimum: 1, description: "Number of consecutive messages from id, defaults to 1 for a numeric id" }),
 );
@@ -76,7 +69,7 @@ const ZOOM_PARAMETERS = Type.Object(
 				Type.String({ minLength: 1, maxLength: MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS }),
 			],
 			{
-				description: "Message id, agent name, or worker-ref reference",
+				description: "JSON integer for a chat message, string for an agent name or worker-ref reference",
 			},
 		),
 		n: ZOOM_N_PARAMETER,
@@ -87,7 +80,9 @@ const ZOOM_PARAMETERS = Type.Object(
 /** A worker's zoom: message ids only, since another agent's private log stays readable by the root alone. */
 const MESSAGE_ZOOM_PARAMETERS = Type.Object(
 	{
-		id: Type.Integer({ minimum: 0, description: "Message id" }),
+		id: Type.Union([Type.Integer({ minimum: 0 }), Type.String({ pattern: "^(0|[1-9][0-9]*)$", maxLength: 16 })], {
+			description: "Chat message ID",
+		}),
 		n: ZOOM_N_PARAMETER,
 		page: ZOOM_PAGE_PARAMETER,
 	},
@@ -198,7 +193,7 @@ export function createContinuousChatNavigationTools(
 	options: { agentLogs: boolean },
 ): ToolDefinition[] {
 	const zoomDescription = options.agentLogs
-		? describeTool(CONTINUOUS_CHAT_ZOOM_TOOL_NAME)
+		? `${CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION} ${CONTINUOUS_CHAT_ZOOM_AGENT_DESCRIPTION}`
 		: CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION;
 	return [
 		navigationTool(
@@ -214,7 +209,7 @@ export function createContinuousChatNavigationTools(
 			"Chat Date",
 			"Date of a chat message",
 			DATE_PARAMETERS,
-			describeTool(CONTINUOUS_CHAT_DATE_TOOL_NAME),
+			"The date and time of message id.",
 			execute,
 		),
 	];

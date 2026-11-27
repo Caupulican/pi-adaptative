@@ -168,6 +168,7 @@ export function projectWorkerAttemptLaneRecord(
 		...(reasonCode ? { reasonCode } : {}),
 		...(status === "canceled" && attempt.reasonDetail ? { reasonDetail: attempt.reasonDetail } : {}),
 		queuedAt: attempt.createdAt,
+		...(attempt.firstStartedAt ? { firstStartedAt: attempt.firstStartedAt } : {}),
 		...(attempt.status !== "queued" && attempt.executionStartedAt ? { startedAt: attempt.executionStartedAt } : {}),
 		...(status === "queued" || status === "running"
 			? {}

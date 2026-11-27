@@ -59,10 +59,15 @@ import {
 	toJsonObject,
 	type WorkerResultContract,
 } from "./contracts.ts";
+import { assertObjectiveRouteOwner } from "./dispatch-request-fields.ts";
 import { dispatchForStorage } from "./dispatch-storage.ts";
 import type { OrchestrationEventStore } from "./event-store.ts";
+import { type GoalObjectiveSource, goalObjectiveReconciliationEvent } from "./goal-objective-reconciliation.ts";
 import { ModelTransferRuntime } from "./model-transfer-runtime.ts";
 import { assertNotificationCapacity } from "./notification-eviction.ts";
+import { assertEvidenceCriteriaRetained } from "./objective-criteria.ts";
+import { objectiveEvidenceRecordEvent } from "./objective-evidence.ts";
+import { objectiveEvidenceCounts } from "./objective-evidence-capacity.ts";
 import { assertLifetimeHeadroom, describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
 import { assertRetentionPruneAllowed } from "./retention-eligibility.ts";
 import { RetentionPlanStaleError, type RetentionPrunedPayload, retentionPruneEventInput } from "./retention-event.ts";
@@ -86,8 +91,6 @@ import {
 import {
 	assertBoundedIdentifierList,
 	assertIdentifierListHasCapacity,
-	assertObjectiveEvidenceHasCapacity,
-	assertProjectionRecordReplacementWithinLimits,
 	assertRecordHasCapacity,
 	projectionCapacity,
 	requestedProjectionSlots,
@@ -253,7 +256,10 @@ export class DurableTaskRuntime {
 		for (const evidenceId of evidenceIds) {
 			if (!existingIds.has(evidenceId)) required += 1;
 		}
-		if ((objective?.evidence.length ?? 0) + required > MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE) {
+		if (
+			(objective ? objectiveEvidenceCounts(objectiveId, objective.evidence).independent : 0) + required >
+			MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE
+		) {
 			throw new DurableTaskRuntimeError(
 				`Orchestration objective evidence limit (${MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE}) lacks ${required} required slots.`,
 			);
@@ -265,86 +271,6 @@ export class DurableTaskRuntime {
 			);
 		}
 		return required;
-	}
-
-	/**
-	 * Preflight the final retained objective record for a multi-event owner synchronization. This
-	 * validates the objective metadata and the complete idempotently merged evidence batch before
-	 * ensureObjective can append the first event, so a later byte rejection cannot leave a prefix.
-	 */
-	assertObjectiveSynchronizationHeadroom(
-		input: CreateObjectiveInput & { objectiveId: string },
-		evidence: readonly EvidenceContract[],
-	): void {
-		this.refresh();
-		const objectiveId = dispatchIdentifier(input.objectiveId, "objective.objectiveId");
-		const current = this.state.objectives[objectiveId];
-		const requiredEvidence = this.assertObjectiveEvidenceHeadroom(
-			objectiveId,
-			evidence.map((item) => item.evidenceId),
-		);
-		this.assertProjectionHeadroom({ objectives: current ? 0 : 1, evidence: requiredEvidence });
-		const riskBudget = parseInputRiskBudget(input.riskBudget, "objective.riskBudget");
-		const acceptanceCriteria = structuredClone(input.acceptanceCriteria ?? []);
-		assertAcceptanceCriteria(acceptanceCriteria);
-		const title = input.title.trim();
-		const description = input.description.trim();
-		if (!title || !description) throw new DurableTaskRuntimeError("Objective title and description are required.");
-		const now = this.nowIso();
-		const objective: ObjectiveContract = current
-			? {
-					...current.objective,
-					title,
-					description,
-					constraints: [...(input.constraints ?? [])],
-					acceptanceCriteria,
-					riskBudget,
-					updatedAt: now,
-				}
-			: {
-					schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-					objectiveId,
-					title,
-					description,
-					status: "active",
-					constraints: [...(input.constraints ?? [])],
-					acceptanceCriteria,
-					riskBudget,
-					createdAt: now,
-					updatedAt: now,
-				};
-		if (current) {
-			assertReferencedAcceptanceCriteriaRetained(this.state.tasks, current, acceptanceCriteria);
-		}
-
-		const mergedEvidence = current?.evidence.map((item) => structuredClone(item)) ?? [];
-		const evidenceById = new Map(mergedEvidence.map((item) => [item.evidenceId, item]));
-		for (const item of evidence) {
-			const evidenceId = dispatchIdentifier(item.evidenceId, "objective evidence.evidenceId");
-			if (!item.summary.trim() || !item.createdAt.trim()) {
-				throw new DurableTaskRuntimeError("Objective evidence requires an id, summary, and creation time.");
-			}
-			if (item.criterionId && !objective.acceptanceCriteria.some((criterion) => criterion.id === item.criterionId)) {
-				throw new DurableTaskRuntimeError(
-					`Objective evidence references unknown acceptance criterion '${item.criterionId}'.`,
-				);
-			}
-			const existing = evidenceById.get(evidenceId);
-			if (existing) {
-				if (!isDeepStrictEqual(existing, item)) {
-					throw new DurableTaskRuntimeError(`Objective evidence '${evidenceId}' has conflicting content.`);
-				}
-				continue;
-			}
-			const retained = structuredClone(item);
-			mergedEvidence.push(retained);
-			evidenceById.set(evidenceId, retained);
-		}
-		assertProjectionRecordReplacementWithinLimits(this.state, "objectives", objectiveId, {
-			objective,
-			taskIds: current?.taskIds ?? [],
-			evidence: mergedEvidence,
-		});
 	}
 
 	registerAgent(input: RegisterAgentInput): AgentBindingContract {
@@ -475,6 +401,7 @@ export class DurableTaskRuntime {
 		if (isDeepStrictEqual(currentFields, nextFields)) return structuredClone(current.objective);
 
 		assertReferencedAcceptanceCriteriaRetained(this.state.tasks, current, acceptanceCriteria);
+		assertEvidenceCriteriaRetained(acceptanceCriteria, current.evidence);
 		const objective: ObjectiveContract = {
 			...current.objective,
 			...nextFields,
@@ -490,35 +417,20 @@ export class DurableTaskRuntime {
 	}
 
 	recordObjectiveEvidence(objectiveId: string, evidence: EvidenceContract): EvidenceContract {
-		this.refresh();
-		const objective = this.requireObjective(objectiveId);
-		const existing = objective.evidence.find((candidate) => candidate.evidenceId === evidence.evidenceId);
-		if (existing) {
-			if (!isDeepStrictEqual(existing, evidence)) {
-				throw new DurableTaskRuntimeError(`Objective evidence '${evidence.evidenceId}' has conflicting content.`);
-			}
-			return structuredClone(existing);
-		}
-		if (!evidence.evidenceId.trim() || !evidence.summary.trim() || !evidence.createdAt.trim()) {
-			throw new DurableTaskRuntimeError("Objective evidence requires an id, summary, and creation time.");
-		}
-		if (
-			evidence.criterionId &&
-			!objective.objective.acceptanceCriteria.some((criterion) => criterion.id === evidence.criterionId)
-		) {
-			throw new DurableTaskRuntimeError(
-				`Objective evidence references unknown acceptance criterion '${evidence.criterionId}'.`,
-			);
-		}
-		assertObjectiveEvidenceHasCapacity(this.state.objectives, objective);
-		this.commit({
-			type: "objective.evidence_recorded",
-			aggregateId: objectiveId,
-			actor: "kernel",
-			idempotencyKey: `objective-evidence-recorded:${objectiveId}:${evidence.evidenceId}`,
-			payload: toJsonObject({ evidence }),
-		});
+		const event = objectiveEvidenceRecordEvent(this.getSnapshot(), objectiveId, evidence);
+		if (event) this.commit(event);
 		return structuredClone(evidence);
+	}
+
+	/** Goal metadata and current coverage share one compare-and-append boundary. */
+	synchronizeGoalObjective(
+		input: CreateObjectiveInput & { objectiveId: string },
+		evidence: readonly EvidenceContract[],
+		source: GoalObjectiveSource,
+	): void {
+		this.refresh();
+		const event = goalObjectiveReconciliationEvent(this.state, input, evidence, source, this.nowIso());
+		if (event) this.commit(event);
 	}
 
 	createTask(input: CreateTaskInput): TaskContract {
@@ -1437,6 +1349,7 @@ export class DurableTaskRuntime {
 	private storedDispatchForTask(task: TaskRuntimeState, dispatch: OrchestrationDispatchRequest) {
 		const stored = dispatchForStorage(dispatch);
 		const normalizedDispatch = dispatchFromValue(stored, "dispatch");
+		assertObjectiveRouteOwner(normalizedDispatch.objectiveRouteOrigin, this.store.sessionId, task.task.objectiveId);
 		if (normalizedDispatch.taskId !== task.task.taskId) {
 			throw new DurableTaskRuntimeError("Dispatch taskId does not match the queued task.");
 		}

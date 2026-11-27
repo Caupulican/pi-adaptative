@@ -606,6 +606,7 @@ async function runFreshWorktreeLaneSupersedesRerunSubleg(
 		...J9_ROOT_JUDGMENTS,
 		...GOAL_STEP_JUDGMENTS,
 		...FILES_CHANGED_CLAIMS,
+		covered_0: { kind: "noul", probability: 0.97 },
 	});
 	try {
 		const { session } = await world.createRootSession("root", {

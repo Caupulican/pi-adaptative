@@ -5,6 +5,7 @@ import { runJourney2BackgroundAndStallPhase } from "./journey-2-background-and-s
 import { runJourney2ContinuousChatPhase } from "./journey-2-continuous-chat.ts";
 import { runJourney2FanoutRacePhase, runJourney2FanoutSlicesPhase } from "./journey-2-fanout.ts";
 import { verifyGoalReplacementDuringRoute } from "./journey-2-goal-replacement.ts";
+import { verifyGoalReportLifetime } from "./journey-2-goal-report-lifetime.ts";
 import { runJourney2OrchestrationPhase } from "./journey-2-orchestration.ts";
 import { runJourney2QueuedRecoveryPhase } from "./journey-2-queued-recovery.ts";
 /**
@@ -91,6 +92,7 @@ export async function runJourney2(): Promise<void> {
 			).toHaveLength(2);
 			await runJourney2FanoutSlicesPhase(world);
 			await runJourney2FanoutRacePhase(world);
+			await verifyGoalReportLifetime(world);
 		},
 	);
 }

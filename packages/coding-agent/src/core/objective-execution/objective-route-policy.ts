@@ -174,6 +174,9 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 	}
 
 	// 6. Missing work class
+	if (input.targetRequirementIds?.length === 0) {
+		return buildRoute(cycleId, objectiveId, "replan", ["requirement_prerequisites_unmet"], input);
+	}
 	const workClass = sem.missingWorkClass ?? "implement";
 	switch (workClass) {
 		case "continue_current_work":

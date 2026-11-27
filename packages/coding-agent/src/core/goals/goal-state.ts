@@ -1,3 +1,31 @@
+import { type GoalOwnerCorrection, isGoalOwnerCorrection } from "./goal-correction-contract.ts";
+import { goalOwnerActivationAt, isOptionalOwnerActivation, recordOwnerActivation } from "./goal-owner-activation.ts";
+import { applyOwnerCorrection, reviseRequirement } from "./goal-owner-correction.ts";
+import {
+	type GoalStatus,
+	isGoalExecutionActive,
+	isGoalStatus,
+	isHeldGoalStopReason,
+	isRunawayStopReason,
+	isValidConsumedRunawaySignatures,
+	MAX_CONSUMED_RUNAWAY_SIGNATURES,
+} from "./goal-status.ts";
+
+export {
+	type GoalStatus,
+	type GoalStoppedStatus,
+	HELD_GOAL_STOP_PREFIXES,
+	isGoalExecutionActive,
+	isGoalResumableStatus,
+	isGoalStoppedStatus,
+	isGoalTerminalStatus,
+	isGoalUnfinishedStatus,
+	isHeldGoalStopReason,
+	isRunawayStopReason,
+	MAX_CONSUMED_RUNAWAY_SIGNATURES,
+} from "./goal-status.ts";
+
+import { isDeepStrictEqual } from "node:util";
 import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	copyCompletionFindings,
@@ -9,15 +37,26 @@ import {
 	MAX_COMPLETION_FINDINGS,
 	sameGateSet,
 } from "./goal-completion-record.ts";
+import { compactGoalCheckEvidence, isGoalEvidenceFields } from "./goal-evidence-ledger.ts";
+import {
+	applyExecutorRefusal,
+	applyGoalExecutorRefusal,
+	clearExecutorRefusal,
+	type ExecutorRefusedEvent,
+	isExecutorRefusedEvent,
+	isRequirementExecutorRefusal,
+	type RequirementExecutorRefusal,
+} from "./goal-executor-refusal.ts";
+import {
+	inheritCurrentWorkerEvidence,
+	isPreviouslyTrustedReceiptReplay,
+	isTrustedGoalEvidence,
+	reconcileGoalEvidenceChange,
+	reopenedRequirement,
+} from "./requirement-proof.ts";
 
-export type GoalStatus =
-	| "active"
-	| "paused"
-	| "blocked"
-	| "usage_limited"
-	| "budget_limited"
-	| "completed"
-	| "cancelled";
+export { isTrustedGoalEvidence } from "./requirement-proof.ts";
+
 export type RequirementStatus = "open" | "satisfied" | "blocked";
 /**
  * What an owner clarification asked for. Mirrors `HumanInputCategory`; clarification is INFORMATION
@@ -36,69 +75,26 @@ export const MAX_GOAL_EVENT_HISTORY = 128;
 export const MAX_GOAL_CLARIFICATIONS = 16;
 /** Bound on one clarification's recorded answer text; the exact answer stays in the human-input snapshot. */
 export const MAX_GOAL_CLARIFICATION_ANSWER_LENGTH = 240;
-/**
- * Upper bound of the durable runaway-signature allowance. A goal that has already consumed this many
- * distinct automatic recoveries since the last owner intervention gets no further automatic resume:
- * the collection refuses, it never evicts an older signature (eviction would reopen that loop).
- */
-export const MAX_CONSUMED_RUNAWAY_SIGNATURES = 16;
-
-/**
- * The reason prefixes of a goal held by a stop of its session's own work: the owner's stop of a bot, and a turn stopped at
- * its dollar or time bound or by its supervision. Each is a system stop that no automatic recovery or usage reset resumes
- * and the owner's next delivered words do; none is a provider failure, so none counts toward `systemFailureStreak`.
- */
-export const HELD_GOAL_STOP_PREFIXES = {
-	ownerStop: "owner_stop:",
-	spendBound: "spend_bound:",
-	timeBound: "time_bound:",
-	supervisionStop: "supervision_stop:",
-} as const;
-
-/** Whether `reason` is the reason of a goal held by a stop of its session's own work (`HELD_GOAL_STOP_PREFIXES`). */
-export function isHeldGoalStopReason(reason: string | undefined): boolean {
-	return (
-		typeof reason === "string" && Object.values(HELD_GOAL_STOP_PREFIXES).some((prefix) => reason.startsWith(prefix))
-	);
-}
-
-/** A system stop reason produced by a bounded harness guard (runaway/stagnant tool loop). */
-export function isRunawayStopReason(reason: string | undefined): boolean {
-	return (
-		typeof reason === "string" &&
-		(reason.startsWith("runaway_tool_loop:") || reason.startsWith("stagnant_tool_cycle:"))
-	);
-}
-
-/** One shared lifecycle classification for tools, runtime, persistence, and UI. */
-export function isGoalExecutionActive(status: GoalStatus): status is "active" {
-	return status === "active";
-}
-/** The unfinished statuses that are not running: the goal waits on the owner, a block or a usage limit. */
-export type GoalStoppedStatus = Exclude<GoalStatus, "active" | "completed" | "cancelled" | "budget_limited">;
-export function isGoalResumableStatus(status: GoalStatus): boolean {
-	return status === "paused" || status === "blocked" || status === "usage_limited";
-}
-export function isGoalStoppedStatus(status: GoalStatus): boolean {
-	return isGoalResumableStatus(status) || status === "budget_limited";
-}
-export function isGoalTerminalStatus(status: GoalStatus): boolean {
-	return status === "completed" || status === "cancelled" || status === "budget_limited";
-}
-export function isGoalUnfinishedStatus(status: GoalStatus): status is GoalStoppedStatus | "active" {
-	return !isGoalTerminalStatus(status);
-}
-
 export interface GoalState {
+	executorRefusal?: RequirementExecutorRefusal;
 	goalId: string;
 	userGoal: string;
 	/** The owner source (`session/entry`) of the owner input the goal was started from; absent when none started it. */
 	ownerSourceId?: string;
+	/** Latest owner start, edit, correction or resume; accounting and system resumes never advance it. */
+	ownerActivatedAt?: string;
+	/** Exact owner input accepted by the most recent model-facing amendment. */
+	amendmentOwnerEntryId?: string;
+	ownerCorrection?: GoalOwnerCorrection;
+	ownerCorrectionProof?: string;
+	ownerCorrectionEvidenceIds?: string[];
 	status: GoalStatus;
 	/** Monotonic state revision used by compare-and-append persistence. Legacy snapshots start at 0. */
 	revision?: number;
 	/** Monotonic meaningful-progress revision used by the continuation stall gate. */
 	progressRevision?: number;
+	/** Changes when the active execution or its goal definition is replaced. */
+	executionEpoch?: number;
 	/** Optional owner-requested ceiling using the shared cache-discounted token-budget accounting. */
 	tokenBudget?: number;
 	/** Budget-counted usage attributed to all goal-owned foreground execution. */
@@ -223,6 +219,11 @@ export interface RequirementCheck {
 }
 
 export interface Requirement {
+	executorRefusal?: RequirementExecutorRefusal;
+	/** Accepted citations bound to this definition of the requirement. */
+	proofKey?: string;
+	definitionAt?: string;
+	definitionRevision?: number;
 	id: string;
 	text: string;
 	/** How the harness proves this requirement at completion; absent means it is judged on evidence. */
@@ -238,10 +239,7 @@ export interface Requirement {
 	 * later populates `"worker"`-kind evidence and prompts an explicit `satisfy_requirement` pass.
 	 */
 	boundLaneId?: string;
-	/**
-	 * IDs of other requirements that must be satisfied before this requirement can be worked on.
-	 * Implementing this native graph tracking allows the orchestrator to automatically sequence subagent delegations.
-	 */
+	/** IDs of requirements that must be satisfied before dispatch. */
 	dependencies?: readonly string[];
 	/**
 	 * ISO timestamp of the moment `boundLaneId` was most recently bound to a REAL lane -- the clock
@@ -265,6 +263,12 @@ export interface GoalEvidenceRef {
 	verified?: boolean;
 	/** Host-observed operation outcome; verifying a failure receipt does not turn it into a success. */
 	outcome?: GoalEvidenceOutcome;
+	/** A direct host check measured outside a worker generation. Older receipts omit this provenance. */
+	directHostCheck?: true;
+	/** Worker generation whose host measurement produced this receipt, when applicable. */
+	sourceAttemptId?: string;
+	/** Host-only scope of a requirement check or accepted worker result. */
+	requirementKey?: string;
 	createdAt: string;
 }
 
@@ -275,7 +279,9 @@ export interface GoalStopModel {
 }
 
 export type GoalEvent =
-	| { type: "edit_goal"; userGoal: string; tokenBudget?: number; now: string }
+	| { type: "correct_completed_goal"; correction: GoalOwnerCorrection; tokenBudget?: number; now: string }
+	| { type: "accept_corrected_outcome"; proofKey: string; evidenceIds: readonly string[]; now: string }
+	| { type: "edit_goal"; userGoal: string; tokenBudget?: number; admittedOwnerEntryId?: string; now: string }
 	| {
 			type: "add_requirement";
 			id: string;
@@ -286,9 +292,10 @@ export type GoalEvent =
 	  }
 	/** Attach, replace, or (without `check`) remove a requirement's check. */
 	| { type: "set_requirement_check"; id: string; check?: RequirementCheck; now: string }
-	| { type: "satisfy_requirement"; id: string; evidenceIds: readonly string[]; now: string }
+	| { type: "satisfy_requirement"; id: string; evidenceIds: readonly string[]; proofKey?: string; now: string }
 	| { type: "block_requirement"; id: string; blockedReason: string; now: string }
 	| { type: "reopen_requirement"; id: string; now: string }
+	| ExecutorRefusedEvent
 	| {
 			type: "dispatch_worker";
 			/** Requirement id the worker is bound to. */
@@ -311,6 +318,9 @@ export type GoalEvent =
 			/** See {@link GoalEvidenceRef.verified}; computed by the tool layer before the event is applied. */
 			verified?: boolean;
 			outcome?: GoalEvidenceOutcome;
+			requirementKey?: string;
+			sourceAttemptId?: string;
+			directHostCheck?: true;
 			now: string;
 	  }
 	| { type: "progress"; now: string }
@@ -384,18 +394,6 @@ function hasOptionalStringArray(record: Record<string, unknown>, key: string): b
 	return record[key] === undefined || isStringArray(record[key]);
 }
 
-function isGoalStatus(value: unknown): value is GoalStatus {
-	return (
-		value === "active" ||
-		value === "paused" ||
-		value === "blocked" ||
-		value === "usage_limited" ||
-		value === "budget_limited" ||
-		value === "completed" ||
-		value === "cancelled"
-	);
-}
-
 function isRequirementStatus(value: unknown): value is RequirementStatus {
 	return value === "open" || value === "satisfied" || value === "blocked";
 }
@@ -426,33 +424,12 @@ function isValidGoalClarifications(value: unknown): boolean {
 	return Array.isArray(value) && value.length <= MAX_GOAL_CLARIFICATIONS && value.every(isGoalClarification);
 }
 
-function isGoalEvidenceKind(value: unknown): value is GoalEvidenceKind {
-	return (
-		value === "file" ||
-		value === "test" ||
-		value === "tool" ||
-		value === "user" ||
-		value === "finding" ||
-		value === "worker" ||
-		value === "check"
-	);
-}
-
 function hasOptionalString(record: Record<string, unknown>, key: string): boolean {
 	return record[key] === undefined || typeof record[key] === "string";
 }
 
 function hasOptionalBoolean(record: Record<string, unknown>, key: string): boolean {
 	return record[key] === undefined || typeof record[key] === "boolean";
-}
-
-function hasOptionalEvidenceOutcome(record: Record<string, unknown>): boolean {
-	return (
-		record.outcome === undefined ||
-		record.outcome === "succeeded" ||
-		record.outcome === "failed" ||
-		record.outcome === "canceled"
-	);
 }
 
 function hasOptionalFiniteNumber(record: Record<string, unknown>, key: string): boolean {
@@ -487,7 +464,14 @@ function isRequirement(value: unknown): value is Requirement {
 		typeof value.updatedAt === "string" &&
 		hasOptionalString(value, "blockedReason") &&
 		hasOptionalString(value, "boundLaneId") &&
-		hasOptionalString(value, "boundAt")
+		hasOptionalString(value, "proofKey") &&
+		hasOptionalString(value, "definitionAt") &&
+		(value.definitionRevision === undefined ||
+			(typeof value.definitionRevision === "number" &&
+				Number.isSafeInteger(value.definitionRevision) &&
+				value.definitionRevision > 0)) &&
+		hasOptionalString(value, "boundAt") &&
+		(value.executorRefusal === undefined || isRequirementExecutorRefusal(value.executorRefusal))
 	);
 }
 
@@ -496,23 +480,27 @@ function isGoalStopModel(value: unknown): value is GoalStopModel {
 }
 
 function isGoalEvidenceRef(value: unknown): value is GoalEvidenceRef {
-	if (!isPlainRecord(value)) return false;
-	return (
-		typeof value.id === "string" &&
-		isGoalEvidenceKind(value.kind) &&
-		typeof value.summary === "string" &&
-		typeof value.createdAt === "string" &&
-		hasOptionalString(value, "uri") &&
-		hasOptionalBoolean(value, "verified") &&
-		hasOptionalEvidenceOutcome(value)
-	);
+	return isPlainRecord(value) && typeof value.createdAt === "string" && isGoalEvidenceFields(value);
 }
 
 export function isGoalEvent(value: unknown): value is GoalEvent {
 	if (!isPlainRecord(value) || typeof value.type !== "string" || typeof value.now !== "string") return false;
 	switch (value.type) {
+		case "correct_completed_goal":
+			return isGoalOwnerCorrection(value.correction) && hasOptionalFiniteNumber(value, "tokenBudget");
+		case "accept_corrected_outcome":
+			return (
+				typeof value.proofKey === "string" &&
+				Array.isArray(value.evidenceIds) &&
+				value.evidenceIds.length <= 12 &&
+				value.evidenceIds.every((id) => typeof id === "string")
+			);
 		case "edit_goal":
-			return typeof value.userGoal === "string" && hasOptionalFiniteNumber(value, "tokenBudget");
+			return (
+				typeof value.userGoal === "string" &&
+				hasOptionalFiniteNumber(value, "tokenBudget") &&
+				hasOptionalString(value, "admittedOwnerEntryId")
+			);
 		case "add_requirement":
 			return (
 				typeof value.id === "string" &&
@@ -523,24 +511,21 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 		case "set_requirement_check":
 			return typeof value.id === "string" && hasOptionalRequirementCheck(value);
 		case "satisfy_requirement":
-			return typeof value.id === "string" && isStringArray(value.evidenceIds);
+			return (
+				typeof value.id === "string" && isStringArray(value.evidenceIds) && hasOptionalString(value, "proofKey")
+			);
 		case "block_requirement":
 			return typeof value.id === "string" && typeof value.blockedReason === "string";
 		case "reopen_requirement":
 			return typeof value.id === "string";
+		case "executor_refused":
+			return isExecutorRefusedEvent(value);
 		case "dispatch_worker":
 			return (
 				typeof value.id === "string" && typeof value.instructions === "string" && hasOptionalString(value, "laneId")
 			);
 		case "add_evidence":
-			return (
-				typeof value.id === "string" &&
-				isGoalEvidenceKind(value.kind) &&
-				typeof value.summary === "string" &&
-				hasOptionalString(value, "uri") &&
-				hasOptionalBoolean(value, "verified") &&
-				hasOptionalEvidenceOutcome(value)
-			);
+			return isGoalEvidenceFields(value);
 		case "progress":
 		case "no_progress":
 			return true;
@@ -600,12 +585,23 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 export function isGoalState(value: unknown): value is GoalState {
 	if (!isPlainRecord(value)) return false;
 	return (
+		(value.executorRefusal === undefined || isRequirementExecutorRefusal(value.executorRefusal)) &&
 		typeof value.goalId === "string" &&
 		typeof value.userGoal === "string" &&
 		hasOptionalString(value, "ownerSourceId") &&
+		isOptionalOwnerActivation(value.ownerActivatedAt) &&
+		hasOptionalString(value, "amendmentOwnerEntryId") &&
+		(value.ownerCorrection === undefined ||
+			(isGoalOwnerCorrection(value.ownerCorrection) &&
+				value.ownerCorrection.revision <= Number(value.revision ?? 0))) &&
+		hasOptionalString(value, "ownerCorrectionProof") &&
+		hasOptionalStringArray(value, "ownerCorrectionEvidenceIds") &&
+		(value.ownerCorrectionEvidenceIds === undefined ||
+			(Array.isArray(value.ownerCorrectionEvidenceIds) && value.ownerCorrectionEvidenceIds.length <= 12)) &&
 		isGoalStatus(value.status) &&
 		hasOptionalFiniteNumber(value, "revision") &&
 		hasOptionalFiniteNumber(value, "progressRevision") &&
+		hasOptionalFiniteNumber(value, "executionEpoch") &&
 		hasOptionalFiniteNumber(value, "tokenBudget") &&
 		hasOptionalFiniteNumber(value, "tokensUsed") &&
 		Array.isArray(value.requirements) &&
@@ -659,18 +655,13 @@ function isGoalCompletionRejection(value: unknown): value is GoalCompletionRejec
 	);
 }
 
-function isValidConsumedRunawaySignatures(value: unknown): boolean {
-	if (value === undefined) return true;
-	if (!isStringArray(value) || value.length > MAX_CONSUMED_RUNAWAY_SIGNATURES) return false;
-	return new Set(value).size === value.length && value.every(isRunawayStopReason);
-}
-
 function cloneRequirement(requirement: Requirement): Requirement {
 	return {
 		...requirement,
 		evidenceIds: [...requirement.evidenceIds],
 		...(requirement.dependencies ? { dependencies: [...requirement.dependencies] } : {}),
 		...(requirement.check ? { check: { ...requirement.check } } : {}),
+		...(requirement.executorRefusal ? { executorRefusal: { ...requirement.executorRefusal } } : {}),
 	};
 }
 
@@ -678,8 +669,10 @@ function cloneGoalEvidenceRef(evidence: GoalEvidenceRef): GoalEvidenceRef {
 	return { ...evidence };
 }
 
-function cloneGoalEvent(event: GoalEvent): GoalEvent {
-	if (event.type === "satisfy_requirement") {
+export function cloneGoalEventForStorage(event: GoalEvent): GoalEvent {
+	if (event.type === "correct_completed_goal") return { ...event, correction: { ...event.correction } };
+	if (event.type === "executor_refused") return { ...event, ids: [...event.ids], definitions: [...event.definitions] };
+	if (event.type === "satisfy_requirement" || event.type === "accept_corrected_outcome") {
 		return { ...event, evidenceIds: [...event.evidenceIds] };
 	}
 	if ((event.type === "add_requirement" || event.type === "set_requirement_check") && event.check) {
@@ -703,16 +696,17 @@ function cloneGoalEvent(event: GoalEvent): GoalEvent {
 	return { ...event };
 }
 
-export function cloneGoalEventForStorage(event: GoalEvent): GoalEvent {
-	return cloneGoalEvent(event);
-}
-
-function cloneGoalState(state: GoalState): GoalState {
+export function cloneGoalStateForStorage(state: GoalState): GoalState {
 	return {
 		...state,
+		...(state.ownerCorrection ? { ownerCorrection: { ...state.ownerCorrection } } : {}),
+		...(state.ownerCorrectionEvidenceIds
+			? { ownerCorrectionEvidenceIds: [...state.ownerCorrectionEvidenceIds] }
+			: {}),
 		requirements: state.requirements.map(cloneRequirement),
 		evidence: state.evidence.map(cloneGoalEvidenceRef),
-		events: state.events.map(cloneGoalEvent),
+		events: state.events.map(cloneGoalEventForStorage),
+		...(state.executorRefusal ? { executorRefusal: { ...state.executorRefusal } } : {}),
 		...(state.consumedRunawaySignatures ? { consumedRunawaySignatures: [...state.consumedRunawaySignatures] } : {}),
 		...(state.clarifications
 			? { clarifications: state.clarifications.map((clarification) => ({ ...clarification })) }
@@ -737,10 +731,6 @@ function cloneGoalState(state: GoalState): GoalState {
 	};
 }
 
-export function cloneGoalStateForStorage(state: GoalState): GoalState {
-	return cloneGoalState(state);
-}
-
 export function createGoalState(
 	args: Pick<GoalState, "goalId" | "userGoal" | "tokenBudget" | "ownerSourceId"> & { now: string },
 ): GoalState {
@@ -757,6 +747,7 @@ export function createGoalState(
 		evidence: [],
 		events: [],
 		createdAt: args.now,
+		ownerActivatedAt: goalOwnerActivationAt({ createdAt: args.now, events: [] }),
 		updatedAt: args.now,
 		lastProgressAt: args.now,
 		stallTurns: 0,
@@ -777,20 +768,6 @@ function updateRequirement(state: GoalState, id: string, update: (requirement: R
 	state.requirements = requirements;
 }
 
-function isPreviouslyTrustedReceiptReplay(
-	existingEvidence: readonly GoalEvidenceRef[],
-	newEvidence: GoalEvidenceRef,
-): boolean {
-	return existingEvidence.some((prev) => {
-		if (!isTrustedGoalEvidence(prev)) return false;
-		if (prev.kind !== newEvidence.kind || prev.outcome !== newEvidence.outcome) return false;
-		if (newEvidence.uri !== undefined && newEvidence.uri.length > 0) {
-			return prev.uri === newEvidence.uri;
-		}
-		return prev.id === newEvidence.id;
-	});
-}
-
 /**
  * Keeps the clarification ledger within {@link MAX_GOAL_CLARIFICATIONS}. Settled entries are dropped
  * oldest-first so a question still waiting on the owner survives. A ledger that is entirely pending
@@ -807,19 +784,34 @@ function boundGoalClarifications(clarifications: readonly GoalClarification[]): 
 	return kept;
 }
 
-export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
+export function applyGoalEvent(
+	state: GoalState,
+	event: GoalEvent,
+	proofLifecycle: "current" | "legacy" = "current",
+): GoalState {
 	const newState: GoalState = {
 		...state,
 		revision: (state.revision ?? 0) + 1,
 		requirements: state.requirements.map(cloneRequirement),
 		evidence: state.evidence.map(cloneGoalEvidenceRef),
-		events: [...state.events.map(cloneGoalEvent), cloneGoalEvent(event)].slice(-MAX_GOAL_EVENT_HISTORY),
+		events: [...state.events.map(cloneGoalEventForStorage), cloneGoalEventForStorage(event)].slice(
+			-MAX_GOAL_EVENT_HISTORY,
+		),
 		updatedAt: event.now,
+		ownerActivatedAt: recordOwnerActivation(goalOwnerActivationAt(state), event),
 	};
 
 	switch (event.type) {
+		case "correct_completed_goal":
+			applyOwnerCorrection(state, newState, event);
+			break;
+		case "accept_corrected_outcome":
+			newState.ownerCorrectionProof = event.proofKey;
+			newState.ownerCorrectionEvidenceIds = [...event.evidenceIds];
+			break;
 		case "edit_goal": {
 			newState.userGoal = event.userGoal;
+			newState.amendmentOwnerEntryId = event.admittedOwnerEntryId;
 			if (event.tokenBudget !== undefined) newState.tokenBudget = event.tokenBudget;
 			if (state.status === "completed") newState.status = "active";
 			if (
@@ -844,6 +836,12 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 				evidenceIds: [],
 				dependencies: event.dependencies,
 				createdAt: existingIndex >= 0 ? newState.requirements[existingIndex].createdAt : event.now,
+				...(existingIndex >= 0
+					? {
+							definitionAt: event.now,
+							definitionRevision: proofLifecycle === "current" ? newState.revision : undefined,
+						}
+					: {}),
 				updatedAt: event.now,
 			};
 			if (existingIndex >= 0) {
@@ -859,8 +857,13 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 
 		case "set_requirement_check": {
 			updateRequirement(newState, event.id, (requirement) => {
-				const { check: _previous, ...rest } = requirement;
-				return { ...rest, ...(event.check ? { check: { ...event.check } } : {}), updatedAt: event.now };
+				if (isDeepStrictEqual(requirement.check, event.check)) return requirement;
+				const { check: _previous, ...rest } = reviseRequirement(
+					requirement,
+					event.now,
+					proofLifecycle === "current" ? newState.revision : undefined,
+				);
+				return { ...rest, ...(event.check ? { check: { ...event.check } } : {}) };
 			});
 			break;
 		}
@@ -870,6 +873,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 				...requirement,
 				status: "satisfied",
 				evidenceIds: [...event.evidenceIds],
+				proofKey: event.proofKey,
 				updatedAt: event.now,
 				blockedReason: undefined,
 			}));
@@ -890,17 +894,17 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 		}
 
 		case "reopen_requirement": {
-			updateRequirement(newState, event.id, (requirement) => ({
-				...requirement,
-				status: "open",
-				blockedReason: undefined,
-				updatedAt: event.now,
-			}));
+			updateRequirement(newState, event.id, (requirement) => reopenedRequirement(requirement, event.now));
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
 			newState.progressRevision = (state.progressRevision ?? 0) + 1;
 			break;
 		}
+
+		case "executor_refused":
+			newState.requirements = applyExecutorRefusal(newState.requirements, event);
+			applyGoalExecutorRefusal(newState, event);
+			break;
 
 		case "dispatch_worker": {
 			// Records the requirement<->lane binding ONLY -- never satisfies the requirement and never
@@ -909,6 +913,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			updateRequirement(newState, event.id, (requirement) => ({
 				...requirement,
 				boundLaneId: event.laneId,
+				...(event.laneId ? { executorRefusal: undefined } : {}),
 				// Start (or keep) the wait-timeout clock ONLY when this dispatch actually bound a real
 				// lane -- a declined dispatch (no laneId) preserves whatever boundAt was already there.
 				boundAt: event.laneId ? event.now : requirement.boundAt,
@@ -927,6 +932,12 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 				uri: event.uri,
 				verified: event.verified,
 				outcome: event.outcome,
+				requirementKey: event.requirementKey,
+				sourceAttemptId: event.sourceAttemptId,
+				...(event.directHostCheck === true ||
+				(proofLifecycle === "current" && event.kind === "check" && event.sourceAttemptId === undefined)
+					? { directHostCheck: true as const }
+					: {}),
 				createdAt: existing !== undefined ? existing.createdAt : event.now,
 			};
 			if (existingIndex >= 0) {
@@ -1095,6 +1106,8 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			newState.blockedReason = undefined;
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
+			if (event.source === "owner") newState.executorRefusal = undefined;
+			if (event.source === "owner") newState.requirements = newState.requirements.map(clearExecutorRefusal);
 			if (event.source === "system") {
 				// An automatic resume consumes the stop's runaway signature. The collection is bounded
 				// and never evicts: at capacity the reducer records nothing more and the controller
@@ -1139,6 +1152,26 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 		}
 	}
 
+	inheritCurrentWorkerEvidence(state, newState);
+
+	if (
+		proofLifecycle === "current" &&
+		(event.type === "add_evidence" || event.type === "add_requirement" || event.type === "set_requirement_check")
+	) {
+		reconcileGoalEvidenceChange(state, newState, event);
+		if (event.type !== "add_evidence" || event.kind === "check") compactGoalCheckEvidence(newState);
+	}
+
+	if (
+		state.status !== newState.status ||
+		state.userGoal !== newState.userGoal ||
+		state.tokenBudget !== newState.tokenBudget ||
+		event.type === "add_requirement" ||
+		(event.type === "set_requirement_check" &&
+			!isDeepStrictEqual(state.requirements.find((item) => item.id === event.id)?.check, event.check))
+	)
+		newState.executionEpoch = newState.revision;
+
 	// The block origin lives exactly as long as the block: one rule for every transition out of it.
 	if (newState.status === "blocked" || newState.blockedBy === undefined) return newState;
 	const { blockedBy: _endedBlock, ...unblocked } = newState;
@@ -1150,19 +1183,15 @@ export function shouldContinueGoalLoop(args: { state: GoalState; maxStallTurns: 
 }
 
 export function serializeGoalState(state: GoalState): string {
-	return JSON.stringify(cloneGoalState(state), null, 2);
+	return JSON.stringify(cloneGoalStateForStorage(state), null, 2);
 }
 
 export function parseGoalState(text: string): GoalState | undefined {
 	try {
 		const parsed: unknown = JSON.parse(text);
 		if (!isGoalState(parsed)) return undefined;
-		return cloneGoalState(parsed);
+		return cloneGoalStateForStorage(parsed);
 	} catch {
 		return undefined;
 	}
-}
-
-export function isTrustedGoalEvidence(evidence: GoalEvidenceRef): boolean {
-	return evidence.verified === true && (evidence.kind !== "test" || evidence.outcome === "succeeded");
 }

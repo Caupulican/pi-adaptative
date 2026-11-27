@@ -1,6 +1,13 @@
 import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
+import { currentGoalExecutorRefusal, executorAdmissionExhausted } from "./goal-executor-refusal.ts";
 import { isSystemBlockedGoal } from "./goal-lifecycle.ts";
 import type { GoalState, Requirement } from "./goal-state.ts";
+import {
+	currentExecutorRefusal,
+	matchesRequirementBinding,
+	projectRequirementWaits,
+} from "./requirement-dependencies.ts";
+import { currentGoalRequirements } from "./requirement-proof.ts";
 
 /** Repeated failure under one premise is evidence about the premise: both stall steers carry this request. */
 const SHARED_PREMISE_CHECK =
@@ -75,6 +82,7 @@ function planWaitTiming(
  */
 export interface GoalBoundWatch {
 	readonly requirementId: string;
+	readonly definitionKey?: string;
 	readonly watchId: string;
 	readonly status: "live" | "fired" | "timed-out" | "cancelled";
 	readonly remainingMs?: number;
@@ -85,8 +93,14 @@ export function boundWatchesOf(
 	state: GoalState,
 	watches: readonly GoalBoundWatch[] | undefined,
 ): { live: GoalBoundWatch[]; ended: GoalBoundWatch[] } {
-	const open = new Set(state.requirements.filter((r) => r.status === "open").map((r) => r.id));
-	const bound = (watches ?? []).filter((watch) => open.has(watch.requirementId));
+	const open = new Set(
+		currentGoalRequirements(state)
+			.filter((r) => r.status === "open")
+			.map((r) => r.id),
+	);
+	const bound = (watches ?? []).filter(
+		(watch) => open.has(watch.requirementId) && matchesRequirementBinding(state, { goalId: state.goalId, ...watch }),
+	);
 	return {
 		live: bound.filter((watch) => watch.status === "live"),
 		ended: bound.filter((watch) => watch.status !== "live"),
@@ -127,6 +141,7 @@ function planWaitTimeoutMessage(steps: number, maxWaitMs: number, stepIds?: read
 
 export type GoalContinuationAction = "continue" | "ask-user" | "finalize" | "stop" | "waiting";
 export type GoalContinuationReasonCode =
+	| "goal_identity_conflict"
 	| "goal_active"
 	| "goal_completed"
 	| "goal_paused"
@@ -146,7 +161,9 @@ export type GoalContinuationReasonCode =
 	| "worker_wait_timeout"
 	| "lane_sync_conflict"
 	| "lane_sync_required"
-	| "verification_repair_required";
+	| "verification_repair_required"
+	| "executor_admission_backoff"
+	| "executor_admission_exhausted";
 
 export interface GoalContinuationDecision {
 	action: GoalContinuationAction;
@@ -238,6 +255,7 @@ export interface GoalContinuationSettings {
 
 export function evaluateGoalContinuation(args: {
 	state?: GoalState;
+	identityConflict?: string;
 	settings: GoalContinuationSettings;
 	/**
 	 * LaneIds currently queued/running AND tagged with THIS goal's id (see `LaneRecord.goalId`).
@@ -325,6 +343,8 @@ export function evaluateGoalContinuation(args: {
 	 * after its watch ended is work to act on.
 	 */
 	boundWatches?: readonly GoalBoundWatch[];
+	waitingRequirementIds?: ReadonlySet<string>;
+	waitingExecutorRequirementIds?: ReadonlySet<string>;
 	/** Whether a watch the session armed for itself still waits. */
 	sessionWatchLive?: boolean;
 	/** Open requirements System One judged, at p >= 0.90, to wait on state outside the session (`goal-outside-wait.ts`). */
@@ -341,7 +361,7 @@ export function evaluateGoalContinuation(args: {
 		};
 	}
 
-	const state = args.state;
+	const state = { ...args.state, requirements: currentGoalRequirements(args.state) };
 	const openRequirementIds: string[] = [];
 	const blockedRequirementIds: string[] = [];
 	const satisfiedRequirementIds: string[] = [];
@@ -361,6 +381,13 @@ export function evaluateGoalContinuation(args: {
 		satisfiedRequirementIds,
 	};
 
+	if (args.identityConflict)
+		return {
+			...baseDecision,
+			action: "waiting",
+			reasonCode: "goal_identity_conflict",
+			message: args.identityConflict,
+		};
 	if (state.status === "completed") {
 		return {
 			...baseDecision,
@@ -459,11 +486,23 @@ export function evaluateGoalContinuation(args: {
 			message: "The goal has been cancelled.",
 		};
 	}
+	const objectiveRefusal = currentGoalExecutorRefusal(state, Date.parse(args.now ?? new Date().toISOString()));
+	if (objectiveRefusal)
+		return {
+			...baseDecision,
+			action: "waiting",
+			reasonCode: "executor_admission_backoff",
+			message:
+				"The objective's requested executor declined admission. A new admission is scheduled at the recorded deadline.",
+			resumeAt: objectiveRefusal.retryAt,
+		};
 
 	// Only active goals may recover repeated requirement blockers; lifecycle stops above retain
 	// authority over their preserved requirement history. Recovery is not permission to abandon work.
 	const MAX_REQUIREMENT_BLOCKS = 3;
+	const exhaustedIds = new Set(state.requirements.filter(executorAdmissionExhausted).map((item) => item.id));
 	for (const reqId of blockedRequirementIds) {
+		if (exhaustedIds.has(reqId)) continue;
 		const blockCount = state.events.filter((e) => e.type === "block_requirement" && e.id === reqId).length;
 
 		if (blockCount >= MAX_REQUIREMENT_BLOCKS) {
@@ -488,6 +527,23 @@ export function evaluateGoalContinuation(args: {
 	});
 
 	if (openRequirementIds.length === 0) {
+		if (blockedRequirementIds.length > 0 && blockedRequirementIds.every((id) => exhaustedIds.has(id))) {
+			if (planWait) return planWait;
+			if (args.inFlightToolTaskIds?.size)
+				return {
+					...baseDecision,
+					action: "waiting",
+					reasonCode: "tool_task_in_flight",
+					message: "Goal-owned tool work is still running.",
+				};
+			return {
+				...baseDecision,
+				action: "ask-user",
+				reasonCode: "executor_admission_exhausted",
+				message:
+					"Every remaining requirement exhausted its three executor admissions. Restore an eligible executor or revise its scope, then resume the goal.",
+			};
+		}
 		if (blockedRequirementIds.length > 0) {
 			return {
 				...baseDecision,
@@ -618,9 +674,47 @@ export function evaluateGoalContinuation(args: {
 		};
 	}
 
+	const refusalWaits = state.requirements.filter(
+		(requirement) =>
+			requirement.status !== "satisfied" &&
+			currentExecutorRefusal(requirement, Date.parse(args.now ?? new Date().toISOString())),
+	);
+	const watchedForRefusals = boundWatchesOf(state, args.boundWatches);
+	const heldIds = new Set([
+		...(args.waitingExecutorRequirementIds ??
+			projectRequirementWaits(state.requirements, new Set(refusalWaits.map((item) => item.id)))),
+		...(args.waitingRequirementIds ?? watchedForRefusals.live.map((item) => item.requirementId)),
+	]);
+	if (
+		refusalWaits.length > 0 &&
+		openRequirementIds.every((id) => heldIds.has(id)) &&
+		blockedRequirementIds.every((id) => heldIds.has(id))
+	) {
+		const retryAt = refusalWaits
+			.filter((item) => item.executorRefusal!.attempts < 3)
+			.map((item) => item.executorRefusal!.retryAt)
+			.sort()[0];
+		if (!retryAt && watchedForRefusals.live.length === 0)
+			return {
+				...baseDecision,
+				action: "ask-user",
+				reasonCode: "executor_admission_exhausted",
+				message:
+					"Executor admission was refused three times for the remaining scope. Change the requirement or restore the required executor before retrying.",
+			};
+		return {
+			...baseDecision,
+			action: "waiting",
+			reasonCode: "executor_admission_backoff",
+			message:
+				"The remaining work waits on an eligible executor or a bound watch. Admission will be retried at its deadline.",
+			...(retryAt ? { resumeAt: retryAt } : {}),
+		};
+	}
+
 	// Every open requirement waits on outside work a live watch follows: a pass now has nothing to advance.
 	const watched = boundWatchesOf(state, args.boundWatches);
-	const waitingOnWatch = new Set(watched.live.map((watch) => watch.requirementId));
+	const waitingOnWatch = args.waitingRequirementIds ?? new Set(watched.live.map((watch) => watch.requirementId));
 	if (waitingOnWatch.size > 0 && openRequirementIds.every((id) => waitingOnWatch.has(id))) {
 		return watchWait(
 			watched.live,
@@ -649,7 +743,7 @@ export function evaluateGoalContinuation(args: {
 	}
 
 	// System One judged these requirements to wait on outside state, and nothing the session armed follows any of it.
-	const linked = new Set((args.boundWatches ?? []).map((watch) => watch.requirementId));
+	const linked = new Set([...watched.live, ...watched.ended].map((watch) => watch.requirementId));
 	const unwatched = args.sessionWatchLive
 		? []
 		: (args.outsideWaitRequirementIds ?? []).filter((id) => openRequirementIds.includes(id) && !linked.has(id));

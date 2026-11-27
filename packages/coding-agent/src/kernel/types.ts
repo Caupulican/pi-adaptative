@@ -372,6 +372,15 @@ export function describeThrownToolError(error: unknown): {
 	return { structured: undefined, ...fallback, receipt };
 }
 
+/** A tool has committed its terminal effect and owns one tool-free presentation of its receipt. */
+export interface CommittedToolReport {
+	readonly kind: "report_committed_result";
+	/** Spend the report at the physical provider handoff. Replanning never calls this. */
+	readonly beginDispatch?: () => void;
+	/** Invalidated when the owner replaces or cancels the committed presentation. */
+	readonly signal?: AbortSignal;
+}
+
 /** Final or partial result produced by a tool. */
 export interface AgentToolResult<T> {
 	/** Text or image content returned to the model. */
@@ -405,7 +414,7 @@ export interface AgentToolResult<T> {
 	usage?: Usage;
 	/**
 	 * Hint that the agent should stop after the current tool batch.
-	 * Early termination only happens when every finalized tool result in the batch sets this to true.
+	 * Ordinary results stop only when every finalized sibling requests termination. A committed foreground barrier closes the batch immediately.
 	 */
 	terminate?: boolean;
 	/**
@@ -414,7 +423,7 @@ export interface AgentToolResult<T> {
 	 * A `"resume_after_idle"` handoff has already persisted its continuation. The host needs
 	 * the current run to finish before delivering it; queued messages stay queued for that delivery.
 	 */
-	handoff?: boolean | "resume_after_idle";
+	handoff?: boolean | "resume_after_idle" | CommittedToolReport;
 }
 
 /** Callback used by tools to stream partial execution updates. */
@@ -582,19 +591,16 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
 	) => Promise<AgentToolResult<TDetails>>;
 	/**
-	 * Per-tool execution mode override.
-	 * - "sequential": this tool must execute one at a time with other tool calls.
-	 * - "parallel": this tool can execute concurrently with other tool calls.
-	 *
-	 * If omitted, the default execution mode applies.
-	 */
-	/**
 	 * Every call only reads: it changes no file, process or remote state. Harness policy that must tell
 	 * reads from writes (a cheap turn's escalation, the work boundary, a side trip's surface) trusts this
 	 * declaration; a tool that declares nothing is judged by its name and treated as mutating when unknown.
 	 */
 	readOnly?: boolean;
-	executionMode?: ToolExecutionMode;
+	/**
+	 * A selector reads raw provider arguments before validation; it must be pure and total. A foreground
+	 * barrier keeps an effect that can close this run ordered and attached through its real result.
+	 */
+	executionMode?: ToolExecutionMode | ((args: Record<string, unknown>) => ToolExecutionMode | "foreground_barrier");
 	/**
 	 * The file this call will mutate, as the model spelled it, or undefined when it mutates nothing.
 	 *

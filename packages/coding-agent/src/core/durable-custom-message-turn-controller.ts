@@ -1,4 +1,4 @@
-import { type Agent, type CustomMessage, createCustomMessage } from "../kernel/index.ts";
+import { type Agent, type AgentMessage, type CustomMessage, createCustomMessage } from "../kernel/index.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import {
@@ -8,8 +8,9 @@ import {
 	type ParentInputDeliveryOptions,
 	type ParentInputReceipt,
 } from "./parent-input-delivery.ts";
-import type { SteeredMessage } from "./parent-input-steer.ts";
+import type { SteeredInputAdmission, SteeredMessage } from "./parent-input-steer.ts";
 import { CLOSING_RUN_SETTLE_MS, runSettlesWithin } from "./session-shutdown.ts";
+import { deepFreeze } from "./util/deep-freeze.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
 
 interface DurableCustomMessageTurnControllerDeps {
@@ -33,13 +34,21 @@ interface DurableCustomMessageTurnControllerDeps {
 export class DurableCustomMessageTurnController {
 	private readonly deps: DurableCustomMessageTurnControllerDeps;
 	private readonly parentInputs: ParentInputDeliveryController | undefined;
-	private readonly pending = new Map<CustomMessage<unknown>, { resolve(): void; reject(error: unknown): void }>();
+	private readonly pending = new Map<
+		CustomMessage<unknown>,
+		{
+			resolve(): void;
+			reject(error: unknown): void;
+			admit?: SteeredInputAdmission;
+			persisted?: boolean;
+		}
+	>();
 
 	constructor(deps: DurableCustomMessageTurnControllerDeps) {
 		this.deps = deps;
 		this.parentInputs = deps.parentInput
 			? new ParentInputDeliveryController(
-					{ ...deps.parentInput, steer: (message) => this.steer(message) },
+					{ ...deps.parentInput, steer: (message, admit) => this.steer(message, admit) },
 					deps.foreground,
 					deps.goals,
 					(opening, lease) => this.finishTurn(opening, lease),
@@ -107,6 +116,29 @@ export class DurableCustomMessageTurnController {
 		return true;
 	}
 
+	isPersistedSteer(message: AgentMessage): boolean {
+		return message.role === "custom" && this.pending.get(message)?.persisted === true;
+	}
+
+	/** A declined producer settles its own receipt without interrupting the foreground run. */
+	admitQueuedInput(message: AgentMessage, signal?: AbortSignal): boolean | Promise<boolean> {
+		if (message.role !== "custom") return true;
+		const pending = this.pending.get(message);
+		if (!pending?.admit) return true;
+		return pending.admit(message, signal).then(
+			(admitted) => {
+				if (admitted) pending.persisted = true;
+				else this.notePersisted(message);
+				return admitted;
+			},
+			(error: unknown) => {
+				this.pending.delete(message);
+				pending.reject(error);
+				return false;
+			},
+		);
+	}
+
 	/** Reject queued delivery receipts that can no longer reach persistence during session shutdown. */
 	shutdown(): void {
 		this.parentInputs?.shutdown();
@@ -124,8 +156,11 @@ export class DurableCustomMessageTurnController {
 	 * Queue a message for the running turn's next model step (an idle session's next run reads it first); the handle takes it
 	 * back until a run consumes it, and its acceptance settles after durable append.
 	 */
-	steer<T>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">): SteeredMessage {
-		const { appMessage, acceptedPromise } = this.prepare(message);
+	steer<T>(
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+		admit?: SteeredInputAdmission,
+	): SteeredMessage {
+		const { appMessage, acceptedPromise } = this.prepare(message, admit);
 		const agent = this.deps.steering();
 		try {
 			agent.steer(appMessage);
@@ -223,12 +258,15 @@ export class DurableCustomMessageTurnController {
 		return continued;
 	}
 
-	private prepare<T>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">): {
+	private prepare<T>(
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+		admit?: SteeredInputAdmission,
+	): {
 		appMessage: CustomMessage<T>;
 		acceptedPromise: Promise<void>;
 		rejectAccepted(error: unknown): void;
 	} {
-		const appMessage = {
+		const raw = {
 			role: "custom" as const,
 			customType: message.customType,
 			content: message.content,
@@ -236,13 +274,14 @@ export class DurableCustomMessageTurnController {
 			details: message.details,
 			timestamp: Date.now(),
 		} satisfies CustomMessage<T>;
+		const appMessage = admit ? deepFreeze(structuredClone(raw)) : raw;
 		let resolveAccepted!: () => void;
 		let rejectAccepted!: (error: unknown) => void;
 		const acceptedPromise = new Promise<void>((resolve, reject) => {
 			resolveAccepted = resolve;
 			rejectAccepted = reject;
 		});
-		this.pending.set(appMessage, { resolve: resolveAccepted, reject: rejectAccepted });
+		this.pending.set(appMessage, { resolve: resolveAccepted, reject: rejectAccepted, admit });
 		return { appMessage, acceptedPromise, rejectAccepted };
 	}
 }

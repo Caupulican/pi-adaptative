@@ -6,7 +6,7 @@ import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import { AgentBusyError } from "../../../../src/kernel/agent.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
-import { assertBatchOk, lastToolResultDetails, requestTexts } from "./shared.ts";
+import { assertBatchOk, lastToolResultDetails, ON_TRACK_WORKER_JUDGMENTS, requestTexts } from "./shared.ts";
 
 /** Journey 2's live worker and owner-input boundary: advisory evaluation owns no root submission. */
 export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<void> {
@@ -141,34 +141,21 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 		expect(agentId, `${label}: the production dispatch returned a worker identity`).toBeDefined();
 		await withDeadline(world.trace, `${label}: root idle with worker held`, session.waitForForegroundIdle());
 		if (world.systemOne.enabled) {
-			world.systemOne.enterPhase(
-				`${label}-supervision`,
-				{
-					meaningful_progress: { kind: "noul", probability: 0.97 },
-					worker_stuck: { kind: "noul", probability: 0.02 },
-					work_off_track: { kind: "noul", probability: 0.02 },
-					strategy_repetition: { kind: "noul", probability: 0.02 },
-					needs_independent_verification: { kind: "noul", probability: 0.02 },
-					specialist_gap_present: { kind: "noul", probability: 0.02 },
-					capability_gap_present: { kind: "noul", probability: 0.02 },
-					external_block_present: { kind: "noul", probability: 0.02 },
+			world.systemOne.enterPhase(`${label}-supervision`, ON_TRACK_WORKER_JUDGMENTS, {
+				gate: supervisionMayAnswer.promise,
+				expect: (request) => {
+					expect(request.state, `${label}: supervision reads five executed production calls`).toMatchObject({
+						toolCalls: 5,
+					});
+					expect(
+						isRecordObject(request.state) &&
+							typeof request.state.elapsedMs === "number" &&
+							request.state.elapsedMs >= 3_000,
+						`${label}: production supervision reaches its actual minimum evidence age`,
+					).toBe(true);
 				},
-				{
-					gate: supervisionMayAnswer.promise,
-					expect: (request) => {
-						expect(request.state, `${label}: supervision reads five executed production calls`).toMatchObject({
-							toolCalls: 5,
-						});
-						expect(
-							isRecordObject(request.state) &&
-								typeof request.state.elapsedMs === "number" &&
-								request.state.elapsedMs >= 3_000,
-							`${label}: production supervision reaches its actual minimum evidence age`,
-						).toBe(true);
-					},
-					onAdmit: () => supervisionReached.release(),
-				},
-			);
+				onAdmit: () => supervisionReached.release(),
+			});
 			// The supervisor's production evidence threshold is five calls and three elapsed seconds.
 			// Age the already-started attempt at its transport gate; never alter the supervisor or poll it.
 			minimumAgeTimer = setTimeout(() => workerMayRead.release(), 3_100);

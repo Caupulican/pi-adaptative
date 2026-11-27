@@ -57,6 +57,13 @@ import {
 	judgeAccountClaims,
 } from "./completion-account.ts";
 import { concretizeOutcomeFinding } from "./completion-evidence-gaps.ts";
+import {
+	TerminalCompletionConflictError,
+	type TerminalCompletionOptions,
+	type TerminalCompletionProof,
+	TerminalHookRejectedError,
+	terminalProofRef,
+} from "./completion-proof.ts";
 import { completionJudgmentDigest } from "./completion-replay.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import {
@@ -134,42 +141,13 @@ export type UserRequestClassificationOutcome =
 	| { readonly status: "skipped" }
 	| { readonly status: "unavailable"; readonly reason: string };
 
-export interface TerminalCompletionProof {
-	readonly objectiveId: string;
-	readonly candidateDigest: string;
-	readonly deliveryCertificateId?: string;
-	readonly finalCommit?: string;
-	readonly pushRefs?: readonly string[];
-}
-
-export class TerminalCompletionConflictError extends Error {
-	readonly reason: "conflict" | "invalid_phase" | "empty_proof";
-
-	constructor(reason: "conflict" | "invalid_phase" | "empty_proof") {
-		super(`Terminal completion rejected: ${reason}`);
-		this.name = "TerminalCompletionConflictError";
-		this.reason = reason;
-	}
-}
-
-/** The terminal hook refused or failed before complete was stored. The store is unchanged. */
-export class TerminalHookRejectedError extends Error {
-	constructor(detail: string) {
-		super(detail || "terminal_hook_rejected");
-		this.name = "TerminalHookRejectedError";
-	}
-}
-
-export function terminalProofRef(input: TerminalCompletionProof): string {
-	if (!input.objectiveId.trim() || !input.candidateDigest.trim()) return "";
-	return [
-		input.objectiveId,
-		input.candidateDigest,
-		input.deliveryCertificateId ?? "",
-		input.finalCommit ?? "",
-		...(input.pushRefs ?? []),
-	].join("\n");
-}
+export {
+	TerminalCompletionConflictError,
+	type TerminalCompletionOptions,
+	type TerminalCompletionProof,
+	TerminalHookRejectedError,
+	terminalProofRef,
+} from "./completion-proof.ts";
 
 export interface SystemOneControllerDeps {
 	store: ExecutionStore;
@@ -336,9 +314,14 @@ export class SystemOneController {
 		if (scope && reason) throw new SystemOneStageInterruptedError(scope.stage, reason);
 	}
 
-	syncCanonicalTruth(): void {
+	syncCanonicalTruth(ownerCorrectionEntryId?: string): void {
+		if (ownerCorrectionEntryId && this.store.hasOwnerCorrection(ownerCorrectionEntryId)) return;
 		const hydration = this.truthSource?.();
-		if (hydration) this.store.hydrateFromCanonical(hydration);
+		if (hydration && this.store.hydrateFromCanonical(hydration)) {
+			this.judgedRefusal = undefined;
+			this.completionAccount = undefined;
+			this.pendingDirective = undefined;
+		}
 	}
 
 	hasLiveObjective(): boolean {
@@ -416,6 +399,7 @@ export class SystemOneController {
 	}
 
 	noteCompletionAccount(account: CompletionAccount | undefined): void {
+		this.syncCanonicalTruth();
 		this.completionAccount = account;
 	}
 
@@ -1284,8 +1268,11 @@ export class SystemOneController {
 	 * The one production finalization. Records the proof, transitions phase to complete once,
 	 * and runs the terminal hook once. A duplicate proof does not transition or hook again.
 	 */
-	async commitTerminalCompletion(input: TerminalCompletionProof, options?: { signal?: AbortSignal }): Promise<void> {
+	async commitTerminalCompletion(input: TerminalCompletionProof, options?: TerminalCompletionOptions): Promise<void> {
 		const scope = this.captureStageExecution("completion");
+		options?.signal?.throwIfAborted();
+		options?.assertCurrent?.();
+		this.syncCanonicalTruth();
 		this.verification.assertResolved();
 		this.assertStageCurrent(scope);
 		const ref = terminalProofRef(input);
@@ -1315,6 +1302,8 @@ export class SystemOneController {
 		}
 		this.verification.assertResolved();
 		this.assertStageCurrent(scope);
+		options?.signal?.throwIfAborted();
+		options?.assertCurrent?.();
 		const noted = this.store.noteTerminalProof(ref);
 		if (noted.outcome === "duplicate") return;
 		if (noted.outcome === "rejected") {

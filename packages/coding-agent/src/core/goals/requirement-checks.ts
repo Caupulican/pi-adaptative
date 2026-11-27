@@ -14,10 +14,20 @@ import { type KillTreeOutcome, killTree } from "../../kernel/reliability/process
 import { spawnProcess } from "../../utils/child-process.ts";
 import { getShellConfig } from "../../utils/shell.ts";
 import { readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
-import type { RequirementCheck } from "./goal-state.ts";
+import type { Requirement, RequirementCheck } from "./goal-state.ts";
 
 export const REQUIREMENT_CHECK_TIMEOUT_MS = 30_000;
 const MAX_CHECK_OUTPUT_CHARS = 4_000;
+
+/** Exact acceptance wording that can be verified against a complete owner statement without semantic inference. */
+export function isExplicitRequirementCheckContract(requirement: Requirement): boolean {
+	const check = requirement.check;
+	if (!check) return false;
+	const clauses = [`Run ${JSON.stringify(check.command)} and require exit code ${check.expectExitCode ?? 0}.`];
+	if (check.outputContains !== undefined) clauses.push(`Output must contain ${JSON.stringify(check.outputContains)}.`);
+	if (check.outputExcludes !== undefined) clauses.push(`Output must exclude ${JSON.stringify(check.outputExcludes)}.`);
+	return requirement.text.trim() === clauses.join(" ");
+}
 
 export interface RequirementCheckResult {
 	passed: boolean;
@@ -39,22 +49,67 @@ export function requirementCheckViolation(check: RequirementCheck, cwd: string):
 }
 
 /** Decide a finished run against the check's expectations. Pure. */
-export function judgeRequirementCheck(
+function decideCheck(
 	check: RequirementCheck,
 	exitCode: number,
-	output: string,
+	contains: (expected: string) => boolean,
 ): Pick<RequirementCheckResult, "passed" | "reason"> {
 	const expected = check.expectExitCode ?? 0;
 	if (exitCode !== expected) {
 		return { passed: false, reason: `\`${check.command}\` exited ${exitCode}, expected ${expected}.` };
 	}
-	if (check.outputContains !== undefined && !output.includes(check.outputContains)) {
+	if (check.outputContains !== undefined && !contains(check.outputContains)) {
 		return { passed: false, reason: `\`${check.command}\` output does not contain "${check.outputContains}".` };
 	}
-	if (check.outputExcludes !== undefined && output.includes(check.outputExcludes)) {
+	if (check.outputExcludes !== undefined && contains(check.outputExcludes)) {
 		return { passed: false, reason: `\`${check.command}\` output still contains "${check.outputExcludes}".` };
 	}
 	return { passed: true, reason: `\`${check.command}\` exited ${exitCode} as expected.` };
+}
+
+export function judgeRequirementCheck(
+	check: RequirementCheck,
+	exitCode: number,
+	output: string,
+): Pick<RequirementCheckResult, "passed" | "reason"> {
+	return decideCheck(check, exitCode, (text) => output.includes(text));
+}
+
+/** Match expectations against the whole run while retaining only a bounded diagnostic tail. */
+export class RequirementCheckOutput {
+	tail = "";
+	private overlap = "";
+	private readonly missing: Set<string>;
+	private readonly found = new Set<string>();
+
+	private readonly check: RequirementCheck;
+
+	constructor(check: RequirementCheck) {
+		this.check = check;
+		this.missing = new Set(
+			[check.outputContains, check.outputExcludes].filter(
+				(text): text is string => text !== undefined && text !== "",
+			),
+		);
+	}
+
+	append(chunk: string): void {
+		this.tail = (this.tail + chunk).slice(-MAX_CHECK_OUTPUT_CHARS);
+		if (this.missing.size === 0) return;
+		const window = this.overlap + chunk;
+		let overlapLength = 0;
+		for (const needle of this.missing) {
+			if (window.includes(needle)) {
+				this.found.add(needle);
+				this.missing.delete(needle);
+			} else overlapLength = Math.max(overlapLength, needle.length - 1);
+		}
+		this.overlap = overlapLength ? window.slice(-overlapLength) : "";
+	}
+
+	judge(exitCode: number): Pick<RequirementCheckResult, "passed" | "reason"> {
+		return decideCheck(this.check, exitCode, (needle) => needle === "" || this.found.has(needle));
+	}
 }
 
 /** Run one check in `cwd`. A check that cannot run is a failed check, never a pass. */
@@ -74,6 +129,8 @@ export function runRequirementCheck(
 		env: NodeJS.ProcessEnv;
 	},
 ): Promise<RequirementCheckResult> {
+	if (options.signal?.aborted)
+		return Promise.resolve({ passed: false, exitCode: null, output: "", reason: "The check was cancelled." });
 	const violation = options.admit(check);
 	if (violation) return Promise.resolve({ passed: false, exitCode: null, output: "", reason: violation });
 	let child: ChildProcess;
@@ -95,12 +152,10 @@ export function runRequirementCheck(
 		});
 	}
 	return new Promise((resolve) => {
-		let output = "";
+		const output = new RequirementCheckOutput(check);
 		let settled = false;
 		let stopping = false;
-		const append = (chunk: Buffer) => {
-			output = (output + chunk.toString("utf8")).slice(-MAX_CHECK_OUTPUT_CHARS);
-		};
+		const append = (chunk: string) => output.append(chunk);
 		const finish = (result: RequirementCheckResult) => {
 			if (settled) return;
 			settled = true;
@@ -116,7 +171,7 @@ export function runRequirementCheck(
 				finish({
 					passed: false,
 					exitCode: null,
-					output,
+					output: output.tail,
 					reason: outcome === "failed" ? `${reason} The process-tree termination is unproven.` : reason,
 				});
 			} catch (error) {
@@ -124,7 +179,7 @@ export function runRequirementCheck(
 				finish({
 					passed: false,
 					exitCode: null,
-					output,
+					output: output.tail,
 					reason: `${reason} Process-tree termination failed (${message}); termination is unproven.`,
 				});
 			}
@@ -138,17 +193,22 @@ export function runRequirementCheck(
 		};
 		if (options.signal?.aborted) onAbort();
 		else options.signal?.addEventListener("abort", onAbort, { once: true });
-		child.stdout?.on("data", append);
-		child.stderr?.on("data", append);
+		child.stdout?.setEncoding("utf8").on("data", append);
+		child.stderr?.setEncoding("utf8").on("data", append);
 		child.on("error", (error) => {
 			if (!stopping)
-				finish({ passed: false, exitCode: null, output, reason: `The check failed to run: ${error.message}.` });
+				finish({
+					passed: false,
+					exitCode: null,
+					output: output.tail,
+					reason: `The check failed to run: ${error.message}.`,
+				});
 		});
 		child.on("close", (code) => {
 			if (stopping) return;
 			if (code === null)
-				return finish({ passed: false, exitCode: null, output, reason: "The check was terminated." });
-			finish({ exitCode: code, output, ...judgeRequirementCheck(check, code, output) });
+				return finish({ passed: false, exitCode: null, output: output.tail, reason: "The check was terminated." });
+			finish({ exitCode: code, output: output.tail, ...output.judge(code) });
 		});
 	});
 }

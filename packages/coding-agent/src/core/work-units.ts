@@ -1,7 +1,10 @@
 import { sessionHistoryMessage } from "../kernel/session/session-context-builder.ts";
+import { GOAL_STATE_CUSTOM_TYPE, type SessionEntry } from "../kernel/session/session-entries.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { BACKGROUND_TOOL_COMPLETION_TYPE } from "./background-tool-handoff-text.ts";
+import { decodeGoalJournalPayload, decodeGoalStateSnapshotPayload } from "./goals/session-goal-state.ts";
+import { isPlainRecord } from "./util/value-guards.ts";
 
 /**
  * Session custom entry marking where a unit of work began (conversation-continuity stage 2, the
@@ -22,24 +25,61 @@ export interface WorkUnitRecord {
 
 type WorkUnitSessionView = Pick<SessionManager, "getLeafEntry" | "getEntry" | "appendCustomEntry">;
 
+/** Read backwards on one branch. Old declarations count once a subsequent goal entry confirms the allocation. */
+function branchWorkUnitReader() {
+	let followingGoalId: string | undefined;
+	return (entry: SessionEntry): WorkUnitRecord | undefined => {
+		if (entry.type !== "custom") return undefined;
+		if (entry.customType === GOAL_STATE_CUSTOM_TYPE) {
+			const data = entry.data;
+			if (!isPlainRecord(data)) return undefined;
+			if (data.kind === "events") return undefined;
+			const journal = data.kind === "checkpoint" ? decodeGoalJournalPayload(data) : undefined;
+			const state = journal?.kind === "checkpoint" ? journal.state : decodeGoalStateSnapshotPayload(data);
+			followingGoalId = state?.goalId;
+			if (journal?.kind === "checkpoint" && journal.opensWorkUnit)
+				return {
+					kind: "declared",
+					goalId: journal.state.goalId,
+					reason: journal.state.userGoal,
+					openedAt: Date.parse(entry.timestamp),
+					startEntryId: entry.parentId,
+				};
+			return undefined;
+		}
+		if (entry.customType !== WORK_UNIT_CUSTOM_TYPE || !isPlainRecord(entry.data)) return undefined;
+		const { kind, goalId, reason, openedAt, startEntryId } = entry.data;
+		if (
+			(kind !== "enforced" && !(kind === "declared" && typeof goalId === "string" && followingGoalId === goalId)) ||
+			typeof reason !== "string" ||
+			typeof openedAt !== "number" ||
+			!Number.isFinite(openedAt) ||
+			openedAt < 0 ||
+			(startEntryId !== null && typeof startEntryId !== "string")
+		)
+			return undefined;
+		return { kind, reason, openedAt, startEntryId, ...(typeof goalId === "string" ? { goalId } : {}) };
+	};
+}
+
 /**
  * The work unit the current branch is in: the latest `work_unit` entry, walking back from the leaf, when
  * no owner message came after it. An owner message returns the conversation to the talker, so a unit
  * opened before it is over; a declared unit stays open for as long as its goal is being worked.
  */
 export function currentWorkUnit(
-	manager: WorkUnitSessionView,
+	manager: Pick<WorkUnitSessionView, "getLeafEntry" | "getEntry">,
 	activeGoalId?: string,
 ): { entryId: string; record: WorkUnitRecord } | undefined {
 	let passedOwnerMessage = false;
+	const readUnit = branchWorkUnitReader();
 	for (
 		let entry = manager.getLeafEntry();
 		entry;
 		entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined
 	) {
-		if (entry.type === "custom" && entry.customType === WORK_UNIT_CUSTOM_TYPE) {
-			const record = entry.data as WorkUnitRecord | undefined;
-			if (!record) continue;
+		const record = readUnit(entry);
+		if (record) {
 			if (record.kind === "declared" && record.goalId !== undefined && record.goalId === activeGoalId) {
 				return { entryId: entry.id, record };
 			}
@@ -54,16 +94,6 @@ export function currentWorkUnit(
 	return undefined;
 }
 
-/** Open a work unit at the current leaf. */
-export function openWorkUnit(
-	manager: WorkUnitSessionView,
-	record: Omit<WorkUnitRecord, "startEntryId" | "openedAt">,
-	startEntryId: string | null = manager.getLeafEntry()?.id ?? null,
-): string {
-	const full: WorkUnitRecord = { ...record, startEntryId, openedAt: Date.now() };
-	return manager.appendCustomEntry(WORK_UNIT_CUSTOM_TYPE, full);
-}
-
 export function noteMutatingWorkUnit(
 	manager: WorkUnitSessionView,
 	activeGoalId: string | undefined,
@@ -73,7 +103,12 @@ export function noteMutatingWorkUnit(
 	if (currentWorkUnit(manager, activeGoalId)) return;
 	const entryId = assistantEntryId();
 	if (!entryId) throw new Error("Cannot open a work unit before its mutating assistant message is persisted.");
-	openWorkUnit(manager, { kind: "enforced", reason: `first mutating call: ${toolName}` }, entryId);
+	manager.appendCustomEntry(WORK_UNIT_CUSTOM_TYPE, {
+		kind: "enforced",
+		reason: `first mutating call: ${toolName}`,
+		startEntryId: entryId,
+		openedAt: Date.now(),
+	} satisfies WorkUnitRecord);
 }
 
 /** Session custom entry recording a worker's receipts once its report was accepted (see claim-delivery.ts). */
@@ -92,6 +127,7 @@ function collectWorkWindow(
 	let workUnit: WorkUnitRecord | undefined;
 	let startEntryId: string | null | undefined = openingEntryId;
 	let reachedOpening = false;
+	const readUnit = branchWorkUnitReader();
 	for (
 		let entry = manager.getLeafEntry();
 		entry;
@@ -103,26 +139,12 @@ function collectWorkWindow(
 			if (message) entries.push({ kind: "message", message });
 		} else if (entry.type === "custom" && entry.customType === customType)
 			entries.push({ kind: "custom", entryId: entry.id, data: entry.data });
-		else if (entry.type === "custom" && entry.customType === WORK_UNIT_CUSTOM_TYPE && startEntryId === undefined) {
-			const record = entry.data as WorkUnitRecord | undefined;
-			startEntryId = record?.startEntryId ?? null;
-			if (
-				record &&
-				(record.kind === "declared" || record.kind === "enforced") &&
-				typeof record.reason === "string" &&
-				typeof record.openedAt === "number" &&
-				Number.isFinite(record.openedAt) &&
-				record.openedAt >= 0 &&
-				(record.startEntryId === null || typeof record.startEntryId === "string")
-			)
-				workUnit = {
-					kind: record.kind,
-					reason: record.reason,
-					openedAt: record.openedAt,
-					startEntryId: record.startEntryId,
-					...(typeof record.goalId === "string" ? { goalId: record.goalId } : {}),
-				};
-			if (startEntryId === null) break;
+		else if (startEntryId === undefined) {
+			workUnit = readUnit(entry);
+			if (workUnit) {
+				startEntryId = workUnit.startEntryId;
+				if (startEntryId === null) break;
+			}
 		}
 		if (startEntryId !== undefined && entry.id === startEntryId) {
 			reachedOpening = true;

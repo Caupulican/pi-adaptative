@@ -22,6 +22,7 @@ import { noteDecisionTrace } from "../system-one/semantic-evaluation-ledger.ts";
 import type { GoalSessionController } from "./goal-session-controller.ts";
 import { isGoalUnfinishedStatus, MAX_GOAL_OBJECTIVE_LENGTH } from "./goal-state.ts";
 import { LEGACY_GOAL_TOOL_NAME } from "./goal-tool-names.ts";
+import { greetingWorkRefusal } from "./goal-work-admission.ts";
 import { GoalTokenBudgetParseError, parseExplicitGoalStartAuthority } from "./natural-language-goal.ts";
 
 /**
@@ -110,6 +111,7 @@ function objectiveOf(words: OwnerWords): string | undefined {
 export class OwnerGoalIntent {
 	private readonly ports: OwnerGoalIntentPorts;
 	private outageReported = false;
+	private latestOwnerEntryId: string | undefined;
 	/**
 	 * The judgments still running, owned by the session rather than abandoned: each is detached from the owner's turn, but
 	 * a closing session aborts them all ({@link abort}) and joins them ({@link settle}) before its usage delivery closes,
@@ -130,6 +132,8 @@ export class OwnerGoalIntent {
 	 * turn the judgment returns to may have read other words by then.
 	 */
 	noteDelivered(words: OwnerWords, entryId: string, previousAnswer: AssistantMessage | undefined): void {
+		this.latestOwnerEntryId = entryId;
+		if (greetingWorkRefusal(words)) return;
 		const request = ownerRequestForJudge(words);
 		const objective = objectiveOf(words);
 		if (request === undefined || objective === undefined || statesGoalExplicitly(ownerTypedText(words))) return;
@@ -183,7 +187,13 @@ export class OwnerGoalIntent {
 		previousAnswer: string,
 	): Promise<void> {
 		const exit = await this.judge(engine, request, previousAnswer);
-		if (exit !== "standing_outcome" || this.ports.isDisposed() || this.hasUnfinishedGoal()) return;
+		if (
+			exit !== "standing_outcome" ||
+			this.ports.isDisposed() ||
+			this.hasUnfinishedGoal() ||
+			this.latestOwnerEntryId !== entryId
+		)
+			return;
 		const readiness = this.ports.getAdaptiveReadiness()?.getStatus();
 		if (readiness && !readiness.ready) {
 			this.warn(interfaceText().sessions.goal.intentNotStarted(readiness.issues.join("; ")));

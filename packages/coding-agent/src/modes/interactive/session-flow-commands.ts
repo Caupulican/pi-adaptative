@@ -28,9 +28,9 @@ import {
 	cancelPersistedGoal,
 	clearPersistedGoal,
 	editPersistedGoal,
-	type GoalStateRevision,
 	getGoalStateRevision,
 	isSystemBlockedGoal,
+	type PersistedGoalStateHost,
 	pausePersistedGoal,
 	replaceGoal,
 	resumeGoal,
@@ -774,10 +774,7 @@ export type ParsedGoalContinueCommand =
 	| { ok: false; error: string };
 
 export interface GoalResumeHost {
-	readonly session: {
-		getGoalStateSnapshot: () => GoalState | undefined;
-		saveGoalStateSnapshot: (state: GoalState, expected?: GoalStateRevision) => string;
-		clearGoalStateSnapshot?: (state: GoalState, now: string) => string;
+	readonly session: PersistedGoalStateHost & {
 		restoreGoalRuntimeAfterResume: () => void;
 	};
 	refreshAutonomyFooterStatus(): void;
@@ -927,13 +924,18 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 	}
 
 	if (input === "edit" || input.startsWith("edit ")) {
+		const expectedEntryId = current ? host.session.goalSourcePosition?.(current)?.goalEntryId : undefined;
 		const inlineObjective = input.slice("edit".length).trim();
 		const objective = inlineObjective || (current ? await host.promptForGoalEdit?.(current.userGoal) : undefined);
 		if (!objective) {
 			host.showError(current ? words.editUsage : words.nothingToEdit);
 			return;
 		}
-		const edited = editPersistedGoal(host.session, { userGoal: objective }, now);
+		const edited = editPersistedGoal(
+			host.session,
+			{ userGoal: objective, expected: current ? getGoalStateRevision(current) : undefined, expectedEntryId },
+			now,
+		);
 		if (!edited.ok) {
 			host.showError(refusedGoalActionText(edited, words));
 			return;

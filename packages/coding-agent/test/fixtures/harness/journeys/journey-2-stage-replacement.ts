@@ -295,19 +295,7 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 				world.systemOne.enterPhase(
 					`${label}-next-route`,
 					late
-						? Object.fromEntries(
-								Object.entries(judgments.replacement).filter(
-									([id]) =>
-										!sameIdEdit ||
-										![
-											"objective_coherent",
-											"ambiguity_severity",
-											"missing_information",
-											"acceptance_complete",
-											"grounding_sufficient",
-										].includes(id),
-								),
-							)
+						? judgments.replacement
 						: {
 								...judgments.route,
 								...Object.fromEntries(
@@ -319,9 +307,7 @@ export async function verifyStageReplacement(world: HarnessWorld, judgments: Sta
 												"missing_information",
 												"acceptance_complete",
 												"grounding_sufficient",
-											].includes(id) &&
-											ordering !== "same-a" &&
-											!sameIdEdit,
+											].includes(id) && ordering !== "same-a",
 									),
 								),
 							},

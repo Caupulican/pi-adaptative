@@ -173,6 +173,12 @@ export async function verifyGoalRetrievalReplacement(
 			}),
 		);
 		expect(prefix.outcome?.accepted, `${label}: normal worker report is accepted`).toBe(true);
+		const prefixAttempt = prefix.record?.attemptId;
+		if (!prefixAttempt) throw new Error(`${label}: prefix worker has no durable attempt`);
+		expect(
+			session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts[prefixAttempt]?.dispatch.objectiveRouteOrigin,
+			`${label}: an ordinary worker shares the objective without acquiring a route cycle`,
+		).toBeUndefined();
 		await withDeadline(world.trace, `${label}: ordinary parent notification`, parentReached.promise);
 		await withDeadline(world.trace, `${label}: prefix parent idle`, session.waitForForegroundIdle());
 		expect(
@@ -206,6 +212,18 @@ export async function verifyGoalRetrievalReplacement(
 			.getLaneRecords()
 			.find((record) => record.status === "running" && record.goalId === a.goalId);
 		expect(running, `${label}: original A minion has a real running lane`).toBeDefined();
+		if (!running?.attemptId || !lastDecision) throw new Error(`${label}: routed attempt or decision is absent`);
+		const aAttemptId = running.attemptId;
+		const aOrigin = {
+			sessionId: manager.getSessionId(),
+			objectiveId: goalObjectiveId(a.goalId),
+			cycleId: lastDecision.cycleId,
+			executor: "worker",
+		};
+		expect(
+			session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts[aAttemptId]?.dispatch.objectiveRouteOrigin,
+			`${label}: the attempt that reached the provider owns the exact A route`,
+		).toEqual(aOrigin);
 		expect(
 			(await rejectionOf(session.reload()))?.message,
 			`${label}: writer truthfully refuses retained worker readers`,
@@ -279,6 +297,23 @@ export async function verifyGoalRetrievalReplacement(
 			ledger?.recentRoutes(manager.getSessionId(), goalObjectiveId(replacement.state.goalId), 1).at(-1)?.executor,
 			`${label}: current B uses the real worker executor`,
 		).toBe("worker");
+		const bObjective = goalObjectiveId(replacement.state.goalId);
+		const bCycle = controller?.getLastRoute()?.cycle_id;
+		const attempts = Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {});
+		expect(
+			attempts.find((attempt) => attempt.attemptId === aAttemptId)?.dispatch.objectiveRouteOrigin,
+			`${label}: B's admission preserves the finished A attempt's route`,
+		).toEqual(aOrigin);
+		expect(
+			attempts.some(
+				(attempt) =>
+					attempt.firstStartedAt !== undefined &&
+					attempt.attemptId !== aAttemptId &&
+					attempt.dispatch.objectiveRouteOrigin?.objectiveId === bObjective &&
+					attempt.dispatch.objectiveRouteOrigin.cycleId === bCycle,
+			),
+			`${label}: B ran its own route after replacement`,
+		).toBe(true);
 		await withDeadline(world.trace, `${label}: B parent notified`, bParentReached.promise);
 		await withDeadline(world.trace, `${label}: B parent idle`, session.waitForForegroundIdle());
 		world.systemOne.enterPhase(

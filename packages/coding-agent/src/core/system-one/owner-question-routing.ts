@@ -148,6 +148,12 @@ export function ownerFollowUpPath(agentDir: string, sessionId: string): string {
 	return join(ownerFollowUpsDir(agentDir), `${sessionId}.md`);
 }
 
+/** Resolves the current session's follow-up file when the owner decision is deferred. */
+export function sessionOwnerFollowUpWriter(agentDir: string, sessionId: () => string) {
+	return (entry: Omit<Parameters<typeof appendOwnerFollowUp>[1], "at">) =>
+		appendOwnerFollowUp(ownerFollowUpPath(agentDir, sessionId()), { ...entry, at: new Date().toISOString() });
+}
+
 export function ownerFollowUpBytes(path: string): number {
 	try {
 		return statSync(path).size;

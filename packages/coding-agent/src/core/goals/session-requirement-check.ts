@@ -33,7 +33,17 @@ export interface HostRequirementChecks {
 	 * A check that passed: record it as that requirement's proof (`recordHostRequirementCheckProof`), exactly once per attempt
 	 * and requirement. Present on the host that owns the goal state; a host without it records the pass on the outcome alone.
 	 */
-	recordProof?(attemptId: string, requirementId: string, result: RequirementCheckResult): void;
+	recordProof?(
+		attemptId: string,
+		goalId: string,
+		requirementId: string,
+		definition: string,
+		result: RequirementCheckResult,
+		admission?: {
+			readonly expectedLatestCheckEvidenceId: string | undefined;
+			readonly isCurrentAttempt: () => boolean;
+		},
+	): undefined | boolean | Promise<undefined | boolean>;
 }
 
 /** Why the session may not run `check` in `cwd`, as a sentence, or undefined when it may: judged when it is attached and run. */

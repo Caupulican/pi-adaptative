@@ -29,11 +29,11 @@
 			"reason": "owner approval: the release is recorded durably at the start of the approved body, and a release that cannot be written stops the body"
 		},
 		{
-			"file": "packages/coding-agent/src/core/agent-session-edge.ts",
+			"file": "packages/coding-agent/src/core/autonomy/owner-draft-decisions.ts",
 			"transport": "appendOutwardDraftReleased(",
-			"enclosing": ["releaseOutwardDrafts"],
+			"enclosing": ["releaseAtStart"],
 			"count": 1,
-			"reason": "owner's own run: the release is recorded in the before-tool gate, before the tool body runs"
+			"reason": "At tool start the terminal records one release for the matching pending drafts on the admitted branch. A refused preparation never invokes the callback."
 		},
 		{
 			"file": "packages/coding-agent/src/core/delegation/worker-notification-coordinator.ts",

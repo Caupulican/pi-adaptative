@@ -37,6 +37,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/agent.ts` | (no header comment) |
 | `kernel/assistant-answer.ts` | Assistant answer text for terminal results, including legacy responses without phase metadata. |
 | `kernel/closing-request.ts` | Selects the input that owns a request, builds tool-free contexts, and deduplicates closing instructions. |
+| `kernel/committed-tool-receipt.ts` | Literal evidence the host published for one tool-free completion report. |
 | `kernel/compaction/branch-summarization.ts` | Branch summarization for tree navigation. |
 | `kernel/compaction/compaction.ts` | Context compaction for long sessions. |
 | `kernel/compaction/extraction.ts` | (no header comment) |
@@ -147,6 +148,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/tool-invocation-report.ts` | (no header comment) |
 | `kernel/tool-progress-delivery.ts` | Progress is an observation, not execution authority. |
 | `kernel/tool-protocol-residue.ts` | (no header comment) |
+| `kernel/tool-result-events.ts` | Ordered execution events and protocol results for admitted and declined tool calls. |
 | `kernel/tool-result-progress.ts` | (no header comment) |
 | `kernel/transient-record-decision.ts` | (no header comment) |
 | `kernel/transient-records.ts` | (no header comment) |
@@ -168,7 +170,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-134 kernel modules, 76 with a header comment.
+136 kernel modules, 78 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 

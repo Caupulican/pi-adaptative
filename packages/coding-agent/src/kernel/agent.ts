@@ -316,6 +316,7 @@ export class Agent {
 	public shouldStopAfterTurn?: (signal?: AbortSignal) => boolean | Promise<boolean>;
 	/** Host-owned inbox refresh run immediately before each steering-queue drain. */
 	public beforeSteeringPoll?: (signal?: AbortSignal) => void | Promise<void>;
+	public admitQueuedInput?: AgentLoopConfig["admitQueuedInput"];
 	private activeRun?: ActiveRun;
 	/** No-progress gates shared only by host continuations of the current logical prompt. */
 	private readonly workingHistory = new MessageHistoryMirror();
@@ -863,6 +864,13 @@ export class Agent {
 			getApiKey: this.getApiKey,
 			resolveProviderRequestAuth: this.resolveProviderRequestAuth,
 			prepareProviderRequest: this.prepareProviderRequest,
+			admitQueuedInput:
+				this.admitQueuedInput &&
+				(async (message, signal) => {
+					const admitted = await this.admitQueuedInput?.(message, signal);
+					if (admitted === false) this.settleQueuedInput(message);
+					return admitted !== false;
+				}),
 			getSteeringMessages: async () => {
 				await this.beforeSteeringPoll?.(this.signal);
 				if (skipInitialSteeringPoll) {
@@ -968,6 +976,10 @@ export class Agent {
 		this.followUpQueue.returnUnstarted();
 	}
 
+	private settleQueuedInput(message: AgentMessage): void {
+		if (!this.steeringQueue.noteStarted(message)) this.followUpQueue.noteStarted(message);
+	}
+
 	/**
 	 * Reduce internal state for a loop event, then await listeners.
 	 *
@@ -983,7 +995,7 @@ export class Agent {
 		switch (event.type) {
 			case "message_start":
 				// A started message may already have effects when a listener fails. Only unstarted occurrences return.
-				if (!this.steeringQueue.noteStarted(event.message)) this.followUpQueue.noteStarted(event.message);
+				this.settleQueuedInput(event.message);
 				this._state.streamingMessage = event.message;
 				break;
 

@@ -27,6 +27,7 @@ import {
 } from "./shared.ts";
 
 const TITLE = "Raise the retry limit to 5 and have the change checked";
+const REQUEST = "Raise the retry limit to 5, and have the change checked independently.";
 const CHECK = "grep -n MAX_RETRIES src/limits.ts";
 
 /** What each of the root's actions under a goal is read for with System One on: it moved the work, in scope, and the work goes on. */
@@ -204,7 +205,7 @@ export async function runJourney5PlanVerifyAcceptedPhase(world: HarnessWorld): P
 						type: "toolCall",
 						id: "j5-verify-goal-1",
 						name: "goal",
-						arguments: { action: "start", goalId: "raise-limit", userGoal: "Raise the retry limit to 5." },
+						arguments: { action: "start", goalId: "raise-limit", userGoal: REQUEST },
 					},
 				],
 				stopReason: "toolUse",
@@ -212,13 +213,21 @@ export async function runJourney5PlanVerifyAcceptedPhase(world: HarnessWorld): P
 		},
 		{
 			name: "j5-verify-requirement",
+			check: (request) => {
+				const result = latestBatchResults(request).find((entry) => entry.toolName === "goal");
+				if (!result || result.isError)
+					throw new Error(`the verification goal did not start: ${result?.text ?? "no result"}`);
+			},
 			reply: {
 				content: [
 					{
 						type: "toolCall",
 						id: "j5-verify-requirement-1",
 						name: "goal",
-						arguments: { action: "add_requirement", text: "MAX_RETRIES equals 5" },
+						arguments: {
+							action: "add_requirement",
+							text: world.systemOne.enabled ? "MAX_RETRIES equals 5" : REQUEST,
+						},
 					},
 				],
 				stopReason: "toolUse",
@@ -307,12 +316,9 @@ export async function runJourney5PlanVerifyAcceptedPhase(world: HarnessWorld): P
 		...GOAL_STEP_JUDGMENTS,
 		...FILES_CHANGED_CLAIMS,
 		...COMPLETION_JUDGMENTS,
+		scope_requested: { kind: "noul", probability: 0.97 },
 	});
-	await withDeadline(
-		trace,
-		"J5 verify turn",
-		session.prompt("Goal: raise the retry limit to 5, and have the change checked independently."),
-	);
+	await withDeadline(trace, "J5 verify turn", session.prompt(REQUEST));
 	await withDeadline(trace, "J5 verify: the plan started", started.promise);
 	await withDeadline(trace, "J5 verify: the plan's result woke the root", done.promise, 60_000);
 	await withDeadline(trace, "J5 verify: root idle", session.waitForForegroundIdle());

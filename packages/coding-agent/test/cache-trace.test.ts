@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import type { Message, Model } from "@caupulican/pi-ai";
+import { Type } from "typebox";
 import { afterEach, expect, it, vi } from "vitest";
-import { PromptPrefixMonitor } from "../src/core/cache-trace.ts";
+import { markToolFreeCacheRequest, PromptPrefixMonitor } from "../src/core/cache-trace.ts";
 import { immutableHistoryMessage } from "../src/kernel/message-revision.ts";
 
 const model: Model<"openai-completions"> = {
@@ -51,4 +52,20 @@ it("rechecks a mutable view even if the message identity stays the same", () => 
 	expect(monitor.check(model, context, request)).toBeUndefined();
 	text.text = block("changed context retained for the conversation").text;
 	expect(monitor.check(model, context, request)).toContain("chat view changed");
+});
+
+it("keeps the ordinary tool comparison across an authorized tool-free response", () => {
+	const monitor = new PromptPrefixMonitor();
+	const read = { name: "read", description: "Read a file", parameters: Type.Object({}) };
+	const ordinary = { messages: [], tools: [read] };
+	const report = { messages: [], tools: [] };
+	markToolFreeCacheRequest(report);
+	expect(monitor.check(model, ordinary, request)).toBeUndefined();
+	expect(monitor.check(model, report, request)).toBeUndefined();
+	expect(monitor.check(model, ordinary, request)).toBeUndefined();
+	expect(monitor.check(model, report, request)).toBeUndefined();
+	expect(monitor.check(model, { messages: [], tools: [{ ...read, name: "write" }] }, request)).toContain(
+		"tool set changed (+write, -read)",
+	);
+	expect(monitor.check(model, { messages: [], tools: [] }, request)).toContain("tool set changed (-write)");
 });

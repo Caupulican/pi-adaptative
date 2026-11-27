@@ -13,7 +13,14 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { ObjectiveRoute } from "../objective-execution/objective-route.ts";
+import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
+import { buildObjectiveRoutePrompt } from "../goals/goal-continuation-prompt.ts";
+import {
+	type ObjectiveRoute,
+	type WorkerRouteAdmission,
+	workerRouteAdmission,
+} from "../objective-execution/objective-route.ts";
 import type { ExecutionGrant, OrchestrationThinkingLevel, WorkerResultContract } from "../orchestration/contracts.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
@@ -648,25 +655,52 @@ export class RealScriptRegistry {
 	}
 }
 
+interface WorkerDispatcherOutcome {
+	outcome?: unknown;
+	result?: WorkerResultContract;
+	record?: unknown;
+	started?: boolean;
+	skipReason?: string;
+}
+
 export class RealWorkerDispatcher {
+	readonly ownsSpecialistAttempts = true;
+	readonly dispatch = this.dispatchRoute.bind(this, "worker");
+	readonly continueWorker = this.dispatch;
+	readonly dispatchEscalated = this.dispatchRoute.bind(this, "worker:escalated");
+
 	readonly provenance: PortProvenance;
 	private readonly session: {
-		runWorkerDelegationOnce(request: unknown): Promise<{ result?: WorkerResultContract; record?: unknown }>;
+		readonly sessionId?: string;
+		runWorkerDelegationOnce(
+			request: unknown,
+			onStarted?: (record: LaneRecord) => void,
+		): Promise<WorkerDispatcherOutcome>;
 	};
 
 	private readonly getOwnerRules?: () => string;
+	private readonly getAttemptResult?: (attemptId: string) => WorkerResultContract | undefined;
 
 	constructor(deps: {
+		getAttemptResult?: (attemptId: string) => WorkerResultContract | undefined;
 		session?: {
-			runWorkerDelegationOnce(request: unknown): Promise<{ result?: WorkerResultContract; record?: unknown }>;
+			readonly sessionId?: string;
+			runWorkerDelegationOnce(
+				request: unknown,
+				onStarted?: (record: LaneRecord) => void,
+			): Promise<WorkerDispatcherOutcome>;
 		};
-		runWorkerDelegationOnce?: (request: unknown) => Promise<{ result?: WorkerResultContract; record?: unknown }>;
+		runWorkerDelegationOnce?: (
+			request: unknown,
+			onStarted?: (record: LaneRecord) => void,
+		) => Promise<WorkerDispatcherOutcome>;
 		provenance?: PortProvenance;
 		/** Durable owner development rules, folded into every dispatched worker mission. */
 		getOwnerRules?: () => string;
 	}) {
 		this.provenance = deps.provenance ?? "production-live";
 		this.getOwnerRules = deps.getOwnerRules;
+		this.getAttemptResult = deps.getAttemptResult;
 		if (deps.session) {
 			this.session = deps.session;
 		} else if (deps.runWorkerDelegationOnce) {
@@ -679,9 +713,6 @@ export class RealWorkerDispatcher {
 		}
 		// Execution coordinators consume these methods as callbacks. Bind the adapter boundary once so
 		// selecting a dispatch strategy cannot detach the session receiver used by the real port.
-		this.dispatch = this.dispatch.bind(this);
-		this.continueWorker = this.continueWorker.bind(this);
-		this.dispatchEscalated = this.dispatchEscalated.bind(this);
 		this.dispatchSpecialist = this.dispatchSpecialist.bind(this);
 	}
 
@@ -691,38 +722,59 @@ export class RealWorkerDispatcher {
 		return ownerRules ? `${instructions}\n\n${ownerRules}` : instructions;
 	}
 
-	async dispatch(route: ObjectiveRoute, _signal?: AbortSignal, binding?: unknown): Promise<void> {
-		await this.session.runWorkerDelegationOnce({
+	private async dispatchRoute(
+		executor: "worker" | "worker:escalated",
+		route: ObjectiveRoute,
+		signal?: AbortSignal,
+		binding?: unknown,
+		onStarted?: () => void,
+	): Promise<WorkerRouteAdmission> {
+		signal?.throwIfAborted();
+		const selected = binding === undefined ? undefined : resolveExpertBinding(route.objective_id, binding);
+		const sessionId = this.session.sessionId;
+		const request: WorkerDelegationRequest = {
 			objectiveId: route.objective_id,
-			instructions: this.withOwnerRules(
-				`Execute objective route ${(route as { action?: string }).action ?? route.route}`,
-			),
-			expertBinding: binding,
-		});
+			...(sessionId && {
+				objectiveRouteOrigin: { sessionId, objectiveId: route.objective_id, cycleId: route.cycle_id, executor },
+			}),
+			instructions: this.withOwnerRules(buildObjectiveRoutePrompt(route).text),
+			...(selected && {
+				requireExactModel: true,
+				authority: {
+					model: { provider: selected.providerId, modelId: selected.modelId },
+					thinkingLevel: selected.thinkingLevel,
+				},
+			}),
+			...(route.target_requirement_ids?.length && {
+				taskContext: {
+					requirementIds: route.target_requirement_ids,
+					dependsOnTaskIds: [],
+					acceptanceCriterionIds: [],
+					resourcePointerIds: [],
+				},
+			}),
+		};
+		return (await this.runRoute(request, onStarted)).admission;
 	}
 
-	async continueWorker(route: ObjectiveRoute, _signal?: AbortSignal, binding?: unknown): Promise<void> {
-		await this.session.runWorkerDelegationOnce({
-			objectiveId: route.objective_id,
-			instructions: this.withOwnerRules(
-				`Continue worker for route ${(route as { action?: string }).action ?? route.route}`,
-			),
-			expertBinding: binding,
+	private async runRoute(
+		request: WorkerDelegationRequest,
+		onStarted?: () => void,
+	): Promise<{ outcome: WorkerDispatcherOutcome; admission: WorkerRouteAdmission }> {
+		let running = false;
+		const outcome = await this.session.runWorkerDelegationOnce(request, (record) => {
+			if (workerRouteAdmission({ record }).started) {
+				running = true;
+				onStarted?.();
+			}
 		});
-	}
-
-	async dispatchEscalated(route: ObjectiveRoute, _signal?: AbortSignal, binding?: unknown): Promise<void> {
-		await this.session.runWorkerDelegationOnce({
-			objectiveId: route.objective_id,
-			instructions: this.withOwnerRules(
-				`Execute escalated route ${(route as { action?: string }).action ?? route.route}`,
-			),
-			expertBinding: binding,
-		});
+		return { outcome, admission: running ? { started: true } : workerRouteAdmission(outcome) };
 	}
 
 	async dispatchSpecialist(input: {
 		objectiveId: string;
+		route?: ObjectiveRoute;
+		onStarted?: () => void;
 		specialist: MaterializedSpecialist;
 		taskId: string;
 		attemptId?: string;
@@ -730,24 +782,50 @@ export class RealWorkerDispatcher {
 		fencingToken?: number;
 		expiresAt?: string;
 		signal?: AbortSignal;
-	}): Promise<WorkerResultContract> {
-		const outcome = await this.session.runWorkerDelegationOnce({
+	}): Promise<WorkerResultContract | WorkerRouteAdmission> {
+		input.signal?.throwIfAborted();
+		const sessionId = this.session.sessionId;
+		const route = input.route;
+		const request: WorkerDelegationRequest = {
 			objectiveId: input.objectiveId,
+			...(sessionId &&
+				route && {
+					objectiveRouteOrigin: {
+						sessionId,
+						objectiveId: route.objective_id,
+						cycleId: route.cycle_id,
+						executor: "worker:escalated",
+					},
+				}),
 			instructions: this.withOwnerRules(input.specialist.spec.mission),
 			profileId: input.specialist.profileId,
-			expertBinding: input.specialist.expert,
-			taskContext: {
-				taskId: input.taskId,
-				attemptId: input.attemptId,
+			requireExactModel: true,
+			authority: {
+				model: { provider: input.specialist.expert.providerId, modelId: input.specialist.expert.modelId },
 			},
-		});
-
-		if (!outcome?.result) {
-			// Specialist success is only ever the specialist's own WorkerResultContract.
-			throw new Error(
-				`Specialist dispatch for '${input.specialist.specialistId ?? input.specialist.spec.specialist_id}' returned no WorkerResultContract; a specialist result is never fabricated.`,
-			);
+		};
+		const { outcome, admission } = await this.runRoute(request, input.onStarted);
+		if (!admission.started && (outcome.record || !outcome.result || this.getAttemptResult)) return admission;
+		const record = outcome.record;
+		const attemptId =
+			record && typeof record === "object" && "attemptId" in record && typeof record.attemptId === "string"
+				? record.attemptId
+				: undefined;
+		const result = outcome.result ?? (attemptId ? this.getAttemptResult?.(attemptId) : undefined);
+		if (result) {
+			if (result.objectiveId !== input.objectiveId || (attemptId && result.attemptId !== attemptId))
+				throw new Error("Specialist result does not match its dispatched objective and attempt.");
+			return result;
 		}
-		return outcome.result;
+		if (
+			record &&
+			typeof record === "object" &&
+			"status" in record &&
+			(record.status === "running" || record.status === "queued")
+		)
+			return admission;
+		throw new Error(
+			`Specialist dispatch for '${input.specialist.specialistId ?? input.specialist.spec.specialist_id}' returned no durable worker result.`,
+		);
 	}
 }

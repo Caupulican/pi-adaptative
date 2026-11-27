@@ -16,6 +16,7 @@ import { ForegroundLifecycleAdapter } from "../src/core/foreground-lifecycle-ada
 import { ownerSessionStorageRoots } from "../src/core/orchestration/session-bundle-lifecycle.ts";
 import { projectParentInputs } from "../src/core/parent-input-projection.ts";
 import { Agent } from "../src/kernel/agent.ts";
+import { DEFAULT_COMPACTION_SETTINGS, prepareCompaction } from "../src/kernel/compaction/compaction.ts";
 import { convertToLlm } from "../src/kernel/messages.ts";
 import {
 	parentInputConsumptionOf,
@@ -23,7 +24,7 @@ import {
 	parentWakeContent,
 	parentWakeOf,
 } from "../src/kernel/session/parent-input-ledger.ts";
-import { SessionManager } from "../src/kernel/session/session-manager.ts";
+import { isSessionLifecycleEntry, SessionManager } from "../src/kernel/session/session-manager.ts";
 
 const model: Model<Api> = {
 	id: "dispatch-lifecycle-fixture",
@@ -248,10 +249,19 @@ it("retries an interrupted parent wake after an unrelated assistant answer and s
 				() => 1,
 			)({ messages: manager.buildSessionContext().messages, attempt: 0, sentPrefixCount: 0 });
 		const endFailed = manager.activateParentInputWake(wake.wakeId);
+		expect(manager.getActiveParentInputWake()?.window?.hasExcludedHistory).toBe(false);
+		const savedInput = manager.getEntry(wake.inputs[0]!.entryId)!;
+		expect(manager.getParentCompactionInputs().project(savedInput)).toMatchObject({
+			type: "custom",
+			id: savedInput.id,
+		});
+		expect(JSON.stringify(manager.getParentCompactionInputs().project(savedInput))).not.toContain(content);
 		startRequest(manager, "failed");
 		manager.recordParentInputWakeRequest("failed", convertToLlm((await project()).messages));
 		finish("failed", "error", "Provider rejected the request.");
 		endFailed();
+		const summaryEntry = manager.branchWithSummary(manager.getLeafId(), "Separate branch handoff.");
+		manager.appendCompaction("Separate compaction handoff.", summaryEntry, 200);
 		manager.appendMessage({ role: "user", content: "Separate owner question.", timestamp: Date.now() });
 		startRequest(manager, "owner-only");
 		finish("owner-only", "stop", "Answer to the owner's separate question.");
@@ -260,12 +270,17 @@ it("retries an interrupted parent wake after an unrelated assistant answer and s
 		const inactive = await project();
 		expect(JSON.stringify(convertToLlm(inactive.messages))).not.toContain(content);
 		const endRetry = manager.activateParentInputWake(wake.wakeId);
+		expect(manager.getActiveParentInputWake()?.window?.hasExcludedHistory).toBe(true);
 		const canonical = manager.buildSessionContext().messages;
 		expect(canonical.at(-1)?.role).toBe("assistant");
+		expect(canonical.map((row) => row.role)).toEqual(expect.arrayContaining(["compactionSummary", "branchSummary"]));
 		const plan = await project();
 		const wire = convertToLlm(plan.messages);
 		expect(wire.at(-1)).toMatchObject({ role: "user", content: parentWakeContent(wake.wakeId, wake.inputs) });
-		expect(plan.messages).toHaveLength(canonical.length + 1);
+		expect(JSON.stringify(wire)).toContain(content);
+		expect(JSON.stringify(wire)).not.toMatch(
+			/Separate owner question|Separate (?:branch|compaction) handoff|Answer to the owner's separate question|Provider rejected the request/,
+		);
 		expect(manager.buildSessionContext().messages).toEqual(canonical);
 		startRequest(manager, "retry");
 		expect(() => manager.recordParentInputWakeRequest("retry", convertToLlm(canonical))).toThrow(
@@ -284,6 +299,12 @@ it("retries an interrupted parent wake after an unrelated assistant answer and s
 		manager.settleParentInputWake(wake.wakeId);
 		endRetry();
 		expect(plan.isDispatchCurrent?.()).toBe(false);
+		const preparation = prepareCompaction(
+			manager.getBranch().filter((row) => !isSessionLifecycleEntry(row)),
+			{ ...DEFAULT_COMPACTION_SETTINGS, strategy: "session-replacement" },
+			{ parentInputs: manager.getParentCompactionInputs() },
+		);
+		expect(JSON.stringify(preparation?.messagesToSummarize)).toContain("Background result validated.");
 		expect(manager.getPendingParentInputs()).toHaveLength(0);
 		expect(manager.getEntries().filter(parentWakeOf)).toHaveLength(1);
 		expect(manager.getEntries().flatMap((entry) => parentInputConsumptionOf(entry) ?? [])).toMatchObject([
@@ -292,4 +313,49 @@ it("retries an interrupted parent wake after an unrelated assistant answer and s
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}
+});
+
+it.each(["initial", "mid-turn"] as const)("discards a declined %s steer without requeuing it", async (timing) => {
+	const starts: string[] = [];
+	const declined = {
+		role: "custom" as const,
+		customType: "watch",
+		content: "Already settled",
+		display: true,
+		timestamp: 1,
+	};
+	let requests = 0;
+	const agent = new Agent({
+		initialState: { model },
+		streamFn: () => {
+			if (++requests === 1 && timing === "mid-turn") agent.steer(declined);
+			const stream = new AssistantMessageEventStream();
+			const message: AssistantMessage = {
+				role: "assistant",
+				api: model.api,
+				model: model.id,
+				provider: model.provider,
+				usage: createEmptyUsage(),
+				content: [{ type: "text", text: "Accepted turn." }],
+				stopReason: "stop",
+				timestamp: Date.now(),
+			};
+			stream.push({ type: "done", reason: "stop", message });
+			return stream;
+		},
+	});
+	agent.admitQueuedInput = (message) => message !== declined;
+	agent.subscribe((event) => {
+		if (event.type === "message_start") starts.push(event.message.role);
+	});
+	if (timing === "initial") {
+		agent.steer(declined);
+		await agent.continue();
+	} else await agent.prompt("Finish the current turn.");
+	expect(starts).toEqual(timing === "initial" ? [] : ["user", "assistant"]);
+	expect(requests).toBe(timing === "initial" ? 0 : 1);
+	agent.admitQueuedInput = undefined;
+	await agent.prompt("Next owner request.");
+	expect(starts).not.toContain("custom");
+	expect(agent.state.messages).not.toContain(declined);
 });

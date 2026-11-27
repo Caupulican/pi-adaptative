@@ -5,10 +5,12 @@
  * scheduler hooks through `ObjectiveTerminalPort`; this module owns only the settlement decision.
  */
 
+import { sameGoalExecution } from "../objective-execution/current-objective-execution.ts";
 import type { ObjectiveTerminalResult } from "../objective-execution/objective-route.ts";
-import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
 import { recordObjectiveClarification } from "./goal-clarification-log.ts";
+import { decideGoalCompletion, type GoalCompletionSources, goalCompletionKey } from "./goal-completion-admission.ts";
 import type { GoalCompletionOwnerDecision } from "./goal-completion-owner-decision.ts";
+import type { GoalContinuationDecision } from "./goal-continuation-controller.ts";
 import { type GoalStateRevision, getGoalStateRevision } from "./goal-lifecycle.ts";
 import { applyGoalEvent, type GoalState, isGoalExecutionActive } from "./goal-state.ts";
 import { completeGoalManually } from "./goal-tool-core.ts";
@@ -16,6 +18,8 @@ import { completeGoalManually } from "./goal-tool-core.ts";
 /** The goal session's own state access and effects, the only things a terminal settlement reaches. */
 export interface ObjectiveTerminalPort {
 	getState(): GoalState | undefined;
+	getContinuation?(): GoalContinuationDecision;
+	completionSources?(): GoalCompletionSources;
 	saveState(state: GoalState, expected?: GoalStateRevision): void;
 	stopActiveGoal(status: "blocked" | "budget_limited", reason: string): boolean;
 	emitWarning(message: string): void;
@@ -27,6 +31,17 @@ export interface ObjectiveTerminalPort {
 		userGoal: string;
 		reasons: readonly string[];
 	}): Promise<GoalCompletionOwnerDecision> | undefined;
+}
+
+/** Settles the same persisted refusal after dispatch, on restart, or at the next primary entry. */
+export function parkExhaustedExecutor(
+	port: Pick<ObjectiveTerminalPort, "getContinuation" | "stopActiveGoal">,
+): boolean {
+	const decision = port.getContinuation?.();
+	return (
+		decision?.reasonCode === "executor_admission_exhausted" &&
+		port.stopActiveGoal("blocked", `executor_admission_exhausted: ${decision.message}`)
+	);
 }
 
 /** Objective check codes System One runs at a completion, named for the owner's question. */
@@ -60,29 +75,26 @@ export async function settleObjectiveTerminal(
 	port: ObjectiveTerminalPort,
 	terminal: ObjectiveTerminalResult,
 	goalId: string,
+	signal?: AbortSignal,
 ): Promise<boolean> {
 	const state = port.getState();
 	if (!state || state.goalId !== goalId || !isGoalExecutionActive(state.status)) return false;
+	if (signal?.aborted) return false;
+	if (terminal.goalCompletionKey && terminal.goalCompletionKey !== goalCompletionKey(state)) {
+		port.scheduleGoalAutoContinueFromIdle();
+		return true;
+	}
 	const now = new Date().toISOString();
 	const reasons = terminal.reasonCodes.join(", ");
 	switch (terminal.status) {
 		case "complete": {
-			// Automatic completion is never an owner override, and it persists only once every requirement has
-			// trusted evidence. A judged completion the evidence does not support is not completed and does not stop
-			// the goal: it stays active and continues to gather the missing evidence. The objective's route stall
-			// guard turns a repeated completion route into a replan turn, so repeats are followed by work.
-			const unproven = getUnprovenGoalRequirementIds(state);
-			if (unproven.length > 0) {
-				port.emitWarning(
-					`System One judged the objective complete (${reasons}) but requirements ${unproven.join(", ")} lack trusted evidence; the goal stays active to gather it.`,
-				);
+			const decision = decideGoalCompletion(state, port.completionSources?.() ?? {}, now);
+			if (!decision.ok) {
+				port.emitWarning(decision.error);
 				port.scheduleGoalAutoContinueFromIdle();
 				return true;
 			}
-			port.saveState(
-				applyGoalEvent(state, { type: "complete_goal", acceptanceOverride: false, now }),
-				getGoalStateRevision(state),
-			);
+			port.saveState(decision.state, getGoalStateRevision(state));
 			return false;
 		}
 		case "cancelled":
@@ -91,6 +103,10 @@ export async function settleObjectiveTerminal(
 		case "budget_exhausted":
 			port.stopActiveGoal("budget_limited", reasons || "objective budget exhausted");
 			return false;
+		case "executor_unavailable":
+			if (parkExhaustedExecutor(port)) return false;
+			port.scheduleGoalAutoContinueFromIdle();
+			return true;
 		case "incomplete":
 			port.scheduleGoalAutoContinueFromIdle();
 			return true;
@@ -105,6 +121,20 @@ export async function settleObjectiveTerminal(
 				// The owner's reply lands in the goal's clarification ledger, where the next route and every
 				// continuation read it; the goal may have moved on during the wait, so nothing below reuses
 				// the state read before it.
+				const answered = port.getState();
+				if (
+					signal?.aborted ||
+					!answered ||
+					!sameGoalExecution(state, answered) ||
+					goalCompletionKey(state) !== goalCompletionKey(answered) ||
+					(terminal.goalCompletionKey !== undefined &&
+						!decideGoalCompletion(answered, port.completionSources?.() ?? {}, now).ok)
+				) {
+					port.emitWarning(
+						"The goal changed while its completion question was open. The answer remains attached to the original question.",
+					);
+					return false;
+				}
 				const clarificationLog = {
 					getGoalState: () => port.getState(),
 					saveGoalState: (next: GoalState, expected?: GoalStateRevision) => {

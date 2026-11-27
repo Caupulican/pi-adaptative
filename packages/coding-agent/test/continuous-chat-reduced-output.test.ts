@@ -10,6 +10,7 @@ import {
 import { continuousChatMessageParts } from "../src/core/memory/continuous-chat-ingest.ts";
 import {
 	ContinuousChatNavigator,
+	parseContinuousChatNavigationCommand,
 	renderContinuousChatNavigationResult,
 } from "../src/core/memory/continuous-chat-navigation.ts";
 import { reductionZoomDetails } from "../src/core/memory/continuous-chat-tool-output.ts";
@@ -19,6 +20,61 @@ import { readSchema } from "../src/core/tools/schemas/read.ts";
 import { wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
 
 const counts = { inputBytes: 900, outputBytes: 100, omittedLines: 0 };
+
+describe("zoom target identity", () => {
+	it("keeps numeric agent names addressable without a range", () => {
+		expect(parseContinuousChatNavigationCommand("zoom", { id: "42", page: 1 })).toEqual({
+			tool: "zoom",
+			kind: "worker",
+			name: "42",
+			page: 1,
+		});
+	});
+
+	it("reads a quoted message ID when no such worker exists and keeps every page of a numeric worker in its own log", async () => {
+		const source = {
+			readNode: async () => undefined,
+			readMessageDate: async () => "today",
+			readImage: async () => Buffer.alloc(0),
+			readMessageById: async (id: number) => ({
+				id,
+				kind: "user" as const,
+				date: "today",
+				text: "chat",
+				textBytes: 4,
+				sourceKey: "owner",
+				schemaVersion: 1 as const,
+			}),
+		};
+		const logs = {
+			readPage: async (name: string, page: number) =>
+				name === "42" && page === 0 ? { name, page, hasMore: false, text: "agent" } : undefined,
+		};
+		const navigator = new ContinuousChatNavigator(source, logs);
+		const zoom = async (id: string, page: number, n?: number) => {
+			const command = parseContinuousChatNavigationCommand("zoom", { id, page, n });
+			if ("status" in command) return command;
+			return navigator.execute(command);
+		};
+		expect(await zoom("3536", 0)).toMatchObject({ status: "message", id: 3536, text: "chat" });
+		expect(await zoom("42", 0)).toMatchObject({ status: "worker-log", text: "agent" });
+		expect(await zoom("42", 1)).toMatchObject({ status: "rejected", reason: "not-found" });
+		expect(await zoom("42", 0, 1)).toMatchObject({ status: "message", id: 42 });
+	});
+
+	it.each([
+		{ id: "9007199254740992", n: 1 },
+		{ id: "042", n: 1 },
+		{ id: "42\n", n: 1 },
+		{ id: "42", n: 0 },
+		{ id: "42", n: 1, page: -1 },
+	])("rejects invalid range arguments %o", (args) => {
+		expect(parseContinuousChatNavigationCommand("zoom", args)).toMatchObject({
+			status: "rejected",
+			reason: "invalid-arguments",
+		});
+	});
+});
 
 function capture(toolName: string, details: object, text: string) {
 	const [part] = continuousChatMessageParts({

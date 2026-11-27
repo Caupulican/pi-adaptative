@@ -26,8 +26,11 @@ import type {
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import type { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
+import { requirementKey } from "../goals/goal-acceptance.ts";
 import { GoalOutsideWait } from "../goals/goal-outside-wait.ts";
 import type { GoalWatchFacts } from "../goals/goal-runtime-snapshot.ts";
+import { matchesRequirementBinding } from "../goals/requirement-dependencies.ts";
+import { admitRequirementWatchBinding } from "../goals/requirement-watch-binding.ts";
 import { type HarnessNotice, wordedNotice } from "../harness-notice.ts";
 import { envelopeCeilingUsd } from "../orchestration/risk-budget.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
@@ -70,6 +73,7 @@ import {
 	routineParentInput,
 	routineResultInputIds,
 	routineResultIsQuiet,
+	routineTurnOrigin,
 } from "./routine-parent-input.ts";
 import type { RoutineHostEventPort } from "./routine-scheduler-controller.ts";
 import {
@@ -326,7 +330,7 @@ export class RoutineRuntimeAssembly {
 		const requirement = goal?.requirements.find((entry) => entry.id === requirementId);
 		if (!goal || requirement?.status !== "open")
 			throw new Error(`forRequirement ${requirementId} names no open requirement of the session's goal`);
-		return { goalId: goal.goalId, requirementId };
+		return { goalId: goal.goalId, requirementId, definitionKey: requirementKey(requirement) };
 	}
 
 	/**
@@ -361,11 +365,14 @@ export class RoutineRuntimeAssembly {
 	private workerWakeHost(): WorkerWakeHost {
 		return {
 			snapshot: () => this.host.workerLifecycle().getTaskRuntimeSnapshot(),
-			followUp: (runtimeId, text, idempotencyKey) =>
+			followUp: (runtimeId, text, idempotencyKey, origin) =>
 				this.host
 					.workerController()
 					.getAgentControl()
-					.followUpSessionRootWorkerAgent(runtimeId, text, { idempotencyKey }),
+					.followUpSessionRootWorkerAgent(runtimeId, text, {
+						idempotencyKey,
+						agentWords: origin ? { turnOrigin: origin } : {},
+					}),
 		};
 	}
 
@@ -401,6 +408,7 @@ export class RoutineRuntimeAssembly {
 			runtimeId,
 			routineWakeText(delivery, false, WORKER_WAKE_PLAN_CHARS),
 			input.deliveryId,
+			routineTurnOrigin(delivery.occurrence),
 		);
 		if (wake.kind === "sent") return { entryId: `worker-message:${wake.messageId}` };
 		if (wake.kind === "void") return { entryId: `worker-unwoken:${input.deliveryId}` };
@@ -496,6 +504,15 @@ export class RoutineRuntimeAssembly {
 			sessionId,
 			timers,
 			checks,
+			requirementIsCurrent: (binding) => matchesRequirementBinding(this.deps.getGoalStateSnapshot(), binding),
+			admitRequirementBinding: (binding, condition, signal) =>
+				admitRequirementWatchBinding({
+					binding,
+					condition,
+					goal: () => this.deps.getGoalStateSnapshot(),
+					engine: this.deps.systemOne.semanticDecisionEngine(),
+					signal,
+				}),
 			legacyAgentWatches: () =>
 				(scope === "own-watches" ? heldWatchCount : agentArmedWatchCount)(
 					store.listRoutines(),
@@ -517,7 +534,8 @@ export class RoutineRuntimeAssembly {
 				);
 				return receipt === "settled" ? "settled" : "delivered";
 			},
-			wakeWorker: (runtimeId, text, key) => wakeWorkerRuntime(this.workerWakeHost(), runtimeId, text, key),
+			wakeWorker: (runtimeId, text, key, origin) =>
+				wakeWorkerRuntime(this.workerWakeHost(), runtimeId, text, key, origin),
 			armingEntry: () => this.armingEntry(),
 			warnOwner: warn,
 			tellOwner: (key, text) => this.host.tellOwner(key, text),

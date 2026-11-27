@@ -898,12 +898,13 @@ export class ForegroundRecoveryController {
 
 	/** A durable manifest selects its original opening while the complete canonical history remains intact. */
 	async runCommittedHistory(
-		opening: AgentMessage,
+		openings: AgentMessage[],
 		lease: ForegroundSubmissionLease,
 		signal?: AbortSignal,
 	): Promise<void> {
-		if (!this.deps.agent.state.messages.includes(opening)) throw new Error("Committed history opening is absent.");
-		await this.runAgentExecution("committed", opening, lease, signal);
+		if (!openings.length || openings.some((opening) => !this.deps.agent.state.messages.includes(opening)))
+			throw new Error("Committed history opening is absent.");
+		await this.runAgentExecution("committed", openings, lease, signal);
 	}
 
 	/** Acquire a chat turn before the final continuation guard, then mark its start synchronously with the run. */

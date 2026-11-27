@@ -234,6 +234,7 @@ export class WorkerTaskReconciler {
 							...(newTask
 								? {
 										...(newTask.goalId ? { goalId: newTask.goalId } : {}),
+										objectiveRouteOrigin: newTask.objectiveRouteOrigin,
 										...(newTask.controlForkMode ? { controlForkMode: newTask.controlForkMode } : {}),
 										...(newTask.knowledgeReferences
 											? { knowledgeReferences: newTask.knowledgeReferences }

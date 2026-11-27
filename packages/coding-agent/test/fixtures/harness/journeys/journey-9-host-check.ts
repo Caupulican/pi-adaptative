@@ -26,6 +26,7 @@ const TASK = "Inspect the retry limit of the limits file and cover the requireme
 const REQUIREMENT_ID = "j9-met";
 /** An observational command the read-only shell line admits, and the one a passing host requirement check runs. */
 const CHECK_COMMAND = `rg MAX_RETRIES ${LIMITS_PATH}`;
+const OWNER_CHECK = `Run ${JSON.stringify(CHECK_COMMAND)} and require exit code 0. Output must contain "MAX_RETRIES = 3".`;
 /** What the worker says about the one requirement, in words no claim check reacts to. */
 const PARTIAL_NOTE = "Only the value was read, and I did nothing more with it.";
 const NOW = "2026-10-08T00:00:00.000Z";
@@ -60,7 +61,8 @@ export async function runJourney9HostCheckPhase(world: HarnessWorld): Promise<vo
 	// The goal is seeded in the journal and is active, so a worker may be started for its requirement. Its automatic
 	// continuation is switched off for the leg: the only turns are the owner's and the one the handoff starts.
 	const sessionManager = world.createSessionManager();
-	appendGoalStateSnapshot(sessionManager, goalWithCheckableRequirement());
+	const owner = sessionManager.appendMessage({ role: "user", content: OWNER_CHECK, timestamp: Date.parse(NOW) });
+	appendGoalStateSnapshot(sessionManager, goalWithCheckableRequirement(`${sessionManager.getSessionId()}/${owner}`));
 	const unsubscribe = subscribeOutcomes((outcome) => {
 		if (!outcome.coverage.required.includes(REQUIREMENT_ID)) return;
 		recorded.push(outcome);
@@ -226,10 +228,11 @@ export async function runJourney9HostCheckPhase(world: HarnessWorld): Promise<vo
 }
 
 /** An active goal whose one requirement carries a check the host can rerun. */
-function goalWithCheckableRequirement(): GoalState {
+function goalWithCheckableRequirement(ownerSourceId: string): GoalState {
 	const goal = createGoalState({
 		goalId: "j9-goal",
 		userGoal: "Prove the retry limit of the limits file.",
+		ownerSourceId,
 		now: NOW,
 	});
 	return {
@@ -237,8 +240,8 @@ function goalWithCheckableRequirement(): GoalState {
 		requirements: [
 			{
 				id: REQUIREMENT_ID,
-				text: `The limits file still names MAX_RETRIES, as ${CHECK_COMMAND} shows.`,
-				check: { command: CHECK_COMMAND, expectExitCode: 0 },
+				text: OWNER_CHECK,
+				check: { command: CHECK_COMMAND, expectExitCode: 0, outputContains: "MAX_RETRIES = 3" },
 				status: "open",
 				evidenceIds: [],
 				createdAt: NOW,

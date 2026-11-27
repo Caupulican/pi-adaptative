@@ -36,7 +36,6 @@ import {
 	type AttemptCheckpoint,
 	type AttemptLease,
 	type AttemptStatus,
-	type EvidenceContract,
 	type ExecutionGrant,
 	MAX_ORCHESTRATION_AGENT_BINDINGS,
 	MAX_ORCHESTRATION_APPROVALS,
@@ -55,6 +54,7 @@ import {
 	WORKER_RESULT_STATUSES,
 	type WorkerResultContract,
 } from "./contracts.ts";
+import { assertGoalReconciliationTime, reduceGoalObjectiveReconciliation } from "./goal-objective-reconciliation.ts";
 import {
 	assertModelTransferAllowsNewAgentTurn,
 	assertModelTransferDispatch,
@@ -67,6 +67,8 @@ import {
 import { applyModelTransferEvent } from "./model-transfer-events.ts";
 import { carryPendingModelTransferSources } from "./model-transfer-pending-index.ts";
 import { ensureNotificationCapacity } from "./notification-eviction.ts";
+import { objectiveNeedsCorrectedOutcome, provenObjectiveCriterionIds } from "./objective-criteria.ts";
+import { reduceObjectiveEvidence } from "./objective-evidence.ts";
 import { applyRetentionEvent, describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
 import { assertTaskAttemptBudgetForState } from "./risk-budget.ts";
 import {
@@ -80,7 +82,6 @@ import {
 	checkpointFromPayload,
 	dispatchFromValue,
 	dispatchIdentifier,
-	evidenceFromPayload,
 	executionGrantFromValue,
 	leaseFromPayload,
 	managedLaneLifetimeFromValue,
@@ -96,7 +97,6 @@ import {
 } from "./task-runtime-codecs.ts";
 import {
 	assertIdentifierListHasCapacity,
-	assertObjectiveEvidenceHasCapacity,
 	assertProjectionWithinLimits,
 	assertRecordHasCapacity,
 	cacheProjectionSerializedBytes,
@@ -167,25 +167,27 @@ function assertObjectiveUpdateTransition(
 	return current;
 }
 
-function assertObjectiveEvidenceTransition(
+export type ObjectiveCompletionPolicy = "task_evidence" | "owner_evidence" | "owner_override";
+
+/** Every persisted objective status transition uses the same admission and dependent-work effects. */
+function applyObjectiveLifecycle(
 	state: TaskRuntimeProjection,
 	objectiveId: string,
-	evidence: EvidenceContract,
-): ObjectiveRuntimeState {
-	const objective = state.objectives[objectiveId];
-	if (!objective) throw new DurableTaskRuntimeError(`Unknown objective '${objectiveId}'.`);
-	if (
-		evidence.criterionId &&
-		!objective.objective.acceptanceCriteria.some((criterion) => criterion.id === evidence.criterionId)
-	) {
-		throw new DurableTaskRuntimeError(
-			`Objective evidence references unknown acceptance criterion '${evidence.criterionId}'.`,
+	status: ObjectiveStatus,
+	at: string,
+	policy: ObjectiveCompletionPolicy = "task_evidence",
+): void {
+	assertObjectiveStatusTransition(state, objectiveId, status, policy);
+	updateObjectiveStatus(state, objectiveId, status, at);
+	if (status === "active") refreshReadyTasks(state, objectiveId, at);
+	if (status === "completed" || status === "cancelled")
+		cancelOpenObjectiveWork(
+			state,
+			objectiveId,
+			at,
+			status === "completed" ? "objective_completed" : "objective_cancelled",
 		);
-	}
-	return objective;
 }
-
-export type ObjectiveCompletionPolicy = "task_evidence" | "owner_evidence" | "owner_override";
 
 function assertObjectiveCompletion(
 	state: TaskRuntimeProjection,
@@ -195,6 +197,8 @@ function assertObjectiveCompletion(
 	const objective = state.objectives[objectiveId];
 	if (!objective) throw new DurableTaskRuntimeError(`Unknown objective '${objectiveId}'.`);
 	if (policy === "owner_override") return;
+	if (objectiveNeedsCorrectedOutcome(objective))
+		throw new DurableTaskRuntimeError("Corrected goal requires fresh aggregate outcome proof before completion.");
 	if (policy === "task_evidence") {
 		const incomplete = objective.taskIds.filter((taskId) => state.tasks[taskId]?.task.status !== "completed");
 		if (incomplete.length > 0) {
@@ -214,9 +218,7 @@ function assertObjectiveCompletion(
 						),
 					),
 				];
-	const provenCriterionIds = new Set(
-		evidence.flatMap((item) => (item.trusted && item.criterionId ? [item.criterionId] : [])),
-	);
+	const provenCriterionIds = provenObjectiveCriterionIds(objective, evidence);
 	const unproven = objective.objective.acceptanceCriteria
 		.filter((criterion) => criterion.required && !provenCriterionIds.has(criterion.id))
 		.map((criterion) => criterion.id);
@@ -567,6 +569,8 @@ function applyAttemptQueued(
 		throw new DurableTaskRuntimeError(`Task '${taskId}' is not dispatchable from '${task.task.status}'.`);
 	}
 	const dispatch = dispatchFromValue(payload.dispatch, "attempt.queued.dispatch");
+	if (dispatch.objectiveRouteOrigin && dispatch.objectiveRouteOrigin.objectiveId !== task.task.objectiveId)
+		throw new DurableTaskRuntimeError("Worker route origin differs from the owning objective.");
 	if (dispatch.taskId !== taskId) {
 		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' dispatch task does not match its task.`);
 	}
@@ -887,9 +891,6 @@ export function assertAttemptStartTransition(
 	const attempt = state.attempts[attemptId];
 	if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
 	if (attempt.status !== "leased") throw new DurableTaskRuntimeError(`Attempt '${attemptId}' is not leased.`);
-	if (!attempt.lease || attempt.lease.leaseId !== leaseId || attempt.lease.fencingToken !== fencingToken) {
-		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' lease or fencing token is stale.`);
-	}
 	assertAttemptLeaseMatches(attempt, leaseId, fencingToken, occurredAt);
 	requireActiveObjectiveForAttemptInProjection(state, attempt);
 	return attempt;
@@ -1184,42 +1185,40 @@ export function reduceOrchestrationEvent(
 			objectives[event.aggregateId] = { ...current, objective };
 			break;
 		}
-		case "objective.evidence_recorded": {
-			const evidence = evidenceFromPayload(event.payload);
-			const current = assertObjectiveEvidenceTransition(state, event.aggregateId, evidence);
-			const existing = current.evidence.find((candidate) => candidate.evidenceId === evidence.evidenceId);
-			if (existing && !isDeepStrictEqual(existing, evidence)) {
-				throw new DurableTaskRuntimeError(`Objective evidence '${evidence.evidenceId}' has conflicting content.`);
-			}
-			if (!existing) {
-				assertObjectiveEvidenceHasCapacity(objectives, current);
-				objectives[event.aggregateId] = { ...current, evidence: [...current.evidence, evidence] };
-			}
+		case "objective.goal_reconciled": {
+			const outcome = reduceGoalObjectiveReconciliation(state, event);
+			objectives[event.aggregateId] = outcome.state;
+			if (outcome.targetStatus !== outcome.state.objective.status)
+				applyObjectiveLifecycle(
+					state,
+					event.aggregateId,
+					outcome.targetStatus,
+					event.occurredAt,
+					outcome.completionPolicy,
+				);
+			assertGoalReconciliationTime(projection, state, event.aggregateId);
 			break;
 		}
+		case "objective.evidence_recorded":
+		case "objective.evidence_withdrawn":
+			objectives[event.aggregateId] = reduceObjectiveEvidence(state, event);
+			break;
 		case "objective.paused":
-			assertObjectiveStatusTransition(state, event.aggregateId, "paused");
-			updateObjectiveStatus(state, event.aggregateId, "paused", event.occurredAt);
+			applyObjectiveLifecycle(state, event.aggregateId, "paused", event.occurredAt);
 			break;
 		case "objective.resumed":
-			assertObjectiveStatusTransition(state, event.aggregateId, "active");
-			updateObjectiveStatus(state, event.aggregateId, "active", event.occurredAt);
-			refreshReadyTasks(state, event.aggregateId, event.occurredAt);
+			applyObjectiveLifecycle(state, event.aggregateId, "active", event.occurredAt);
 			break;
 		case "objective.completed": {
 			const policy = string(event.payload.completionPolicy, "objective.completed.completionPolicy");
 			if (policy !== "task_evidence" && policy !== "owner_evidence" && policy !== "owner_override") {
 				throw new DurableTaskRuntimeError(`Unknown objective completion policy '${policy}'.`);
 			}
-			assertObjectiveStatusTransition(state, event.aggregateId, "completed", policy);
-			updateObjectiveStatus(state, event.aggregateId, "completed", event.occurredAt);
-			cancelOpenObjectiveWork(state, event.aggregateId, event.occurredAt, "objective_completed");
+			applyObjectiveLifecycle(state, event.aggregateId, "completed", event.occurredAt, policy);
 			break;
 		}
 		case "objective.cancelled": {
-			assertObjectiveStatusTransition(state, event.aggregateId, "cancelled");
-			updateObjectiveStatus(state, event.aggregateId, "cancelled", event.occurredAt);
-			cancelOpenObjectiveWork(state, event.aggregateId, event.occurredAt, "objective_cancelled");
+			applyObjectiveLifecycle(state, event.aggregateId, "cancelled", event.occurredAt);
 			break;
 		}
 		case "task.created": {
@@ -1516,15 +1515,14 @@ export function reduceOrchestrationEvent(
 			const attemptId = string(event.payload.attemptId, "attempt.started.attemptId");
 			const leaseId = string(event.payload.leaseId, "attempt.started.leaseId");
 			const fencingToken = number(event.payload.fencingToken, "attempt.started.fencingToken");
-			const attempt = assertAttemptStartTransition(
-				state,
-				event.aggregateId,
-				attemptId,
-				leaseId,
-				fencingToken,
-				event.occurredAt,
-			);
-			attempts[attemptId] = { ...attempt, status: "running", updatedAt: event.occurredAt };
+			const at = event.occurredAt;
+			const attempt = assertAttemptStartTransition(state, event.aggregateId, attemptId, leaseId, fencingToken, at);
+			attempts[attemptId] = {
+				...attempt,
+				firstStartedAt: attempt.firstStartedAt ?? at,
+				status: "running",
+				updatedAt: at,
+			};
 			break;
 		}
 		case "attempt.lease_renewed": {

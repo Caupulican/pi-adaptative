@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
+import { saveSessionGoal } from "../src/core/goals/goal-snapshot-admission.ts";
+import { createGoalState } from "../src/core/goals/goal-state.ts";
+import { getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
+import { GoalExecutionCustody } from "../src/core/objective-execution/current-objective-execution.ts";
 import { appendQueuedInputRecord, readQueuedInputRecord } from "../src/core/queued-input-record.ts";
+import { currentWorkUnit, WORK_UNIT_CUSTOM_TYPE, workUnitWindow } from "../src/core/work-units.ts";
 import { SessionMutationBusyError } from "../src/kernel/session/session-append-order.ts";
 import { ownerSessionStorageRoots } from "../src/kernel/session/session-bundle-paths.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
@@ -17,6 +22,23 @@ it("persists the first queued input before any user or assistant message exists"
 		appendQueuedInputRecord(manager, undefined, [input], undefined, "borrowed");
 		const reopened = SessionManager.openReadOnly(manager.getSessionFile()!, roots);
 		expect(readQueuedInputRecord(reopened, undefined)?.inputs).toMatchObject([input]);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+it("recovers the first saved goal before any bootstrap turn or assistant reply", () => {
+	const directory = mkdtempSync(join(tmpdir(), "pi-goal-first-write-"));
+	try {
+		const roots = ownerSessionStorageRoots(directory);
+		const manager = SessionManager.create(directory, roots);
+		expect(manager.hasDurableSessionFile()).toBe(false);
+		const goal = createGoalState({ goalId: "fresh", userGoal: "Observe readiness", now: "2026-11-26T10:00:00Z" });
+		const entry = saveSessionGoal(manager, goal, undefined, new GoalExecutionCustody(), { runtimeFacts: () => ({}) });
+		expect(manager.isEntryDurableForSession(entry)).toBe(true);
+		const reopened = SessionManager.openReadOnly(manager.getSessionFile()!, roots);
+		expect(getLatestGoalStateSnapshot(reopened)).toEqual(goal);
+		expect(currentWorkUnit(reopened, goal.goalId)?.record.goalId).toBe(goal.goalId);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}
@@ -94,3 +116,20 @@ it.skipIf(process.platform !== "linux")(
 		}
 	},
 );
+
+it("ignores an orphan legacy declaration and recognizes one followed by its goal checkpoint", () => {
+	const manager = SessionManager.inMemory(ownerSessionStorageRoots(process.cwd()), process.cwd());
+	const goal = createGoalState({ goalId: "legacy", userGoal: "Recover service", now: "2026-11-26T10:00:00Z" });
+	const id = manager.appendCustomEntry(WORK_UNIT_CUSTOM_TYPE, {
+		kind: "declared",
+		goalId: goal.goalId,
+		reason: goal.userGoal,
+		openedAt: 1,
+		startEntryId: null,
+	});
+	expect(currentWorkUnit(manager)).toBeUndefined();
+	expect(workUnitWindow(manager, "worker_receipts")).toBeUndefined();
+	manager.appendCustomEntry("goal_state", { version: 1, state: goal });
+	expect(currentWorkUnit(manager, goal.goalId)?.entryId).toBe(id);
+	expect(workUnitWindow(manager, "worker_receipts")?.workUnit?.goalId).toBe(goal.goalId);
+});

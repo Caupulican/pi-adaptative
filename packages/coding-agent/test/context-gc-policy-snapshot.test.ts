@@ -15,9 +15,11 @@ import {
 } from "../src/core/context/context-gc-report.ts";
 import { enforcePromptPolicy } from "../src/core/context/context-prompt-enforcement.ts";
 import { correlateWithContextGc, planPromptPolicy } from "../src/core/context/context-prompt-policy.ts";
-import { applyContextGc } from "../src/core/context-gc.ts";
+import { applyContextGc, packSupersededHostRecords } from "../src/core/context-gc.ts";
 import { ownerSessionStorageRoots } from "../src/core/orchestration/session-bundle-lifecycle.ts";
+import { projectParentInputs } from "../src/core/parent-input-projection.ts";
 import { createVersionedMessageHistory, immutableHistoryMessage } from "../src/kernel/message-revision.ts";
+import { parentInputMessage, parentInputMetadataOfMessage } from "../src/kernel/session/parent-input-ledger.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
 import { SettledSessionPayloadReleaser } from "../src/kernel/session/session-payload-retention.ts";
 
@@ -37,6 +39,73 @@ function record(
 		retrievalAvailable: false,
 	};
 }
+
+it("preserves a digest-bound wake when a later event uses the same custom type", async () => {
+	const deliveryId = "watch:first";
+	const payloadDigest = "a".repeat(64);
+	const first = parentInputMessage(
+		{ deliveryId, payloadDigest, origin: { sessionId: "session", leafId: "origin" } },
+		{ customType: "routine-completion", content: "First event. ".repeat(120), display: true },
+	);
+	const later = { ...first, content: "Independent event.", details: { steeredDelivery: true } };
+	const olderRecord = {
+		...later,
+		customType: "context",
+		content: "Old context. ".repeat(120),
+		details: { superseding: true },
+	};
+	const latestRecord = { ...olderRecord, content: "Current context." };
+	const messages = [first, later, olderRecord, latestRecord];
+	const metadata = parentInputMetadataOfMessage(first)!;
+	const wake = {
+		entryId: "wake",
+		wakeId: "wake-id",
+		content: "Wake",
+		inputs: [{ entryId: "input", deliveryId, payloadDigest }],
+	};
+	const plan = projectParentInputs(
+		async ({ messages }) => applyContextGc(messages, { preserveRecentMessages: 0, writePayloads: false }),
+		{
+			captureParentNotes: () => undefined,
+			getPendingParentInputs: () => [{ entryId: "input", metadata }],
+			getActiveParentInputWake: () => wake,
+			getSkippedParentInputIds: () => new Set(),
+			getMessageEntryId: () => undefined,
+		},
+		() => 1,
+	);
+	const request = await plan({ messages, attempt: 0, sentPrefixCount: 0 });
+	expect(request.messages[0]).toBe(first);
+	expect(request.messages[1]).toBe(later);
+	expect(request.messages[2]).not.toBe(olderRecord);
+	expect(request.messages[3]).toBe(latestRecord);
+	const summarized = packSupersededHostRecords(messages);
+	expect(summarized[0]).toBe(first);
+	expect(summarized[1]).toBe(later);
+	expect(summarized[2]).not.toBe(olderRecord);
+	expect(summarized[3]).toBe(latestRecord);
+});
+
+it("keeps a digest-bound parent delivery out of semantic page packing", () => {
+	const content = `<memory_context>${"older evidence ".repeat(120)}</memory_context>`;
+	const input = parentInputMessage(
+		{
+			deliveryId: "memory:delivery",
+			payloadDigest: "a".repeat(64),
+			origin: { sessionId: "session", leafId: "origin" },
+		},
+		{ customType: "memory-context", content, display: true },
+	);
+	const page = { ...input, details: undefined };
+	const gc = applyContextGc([input, page], {
+		preserveRecentMessages: 0,
+		semanticMemory: { preserveRecentPages: 0 },
+		writePayloads: false,
+	});
+	expect(gc.messages[0]).toBe(input);
+	expect(gc.messages[1]).not.toBe(page);
+	expect(gc.report.records[0]).toMatchObject({ reason: "stale-semantic-memory", messageIndex: 1 });
+});
 
 it("replays only accepted artifact views and puts a later full disclosure at the request tail", () => {
 	const store = createInMemoryArtifactStore();

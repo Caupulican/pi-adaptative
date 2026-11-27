@@ -57,7 +57,37 @@ export interface ObjectiveRoute {
 	readonly validation_decision_ids?: readonly string[];
 }
 
+/** An executor with preflight owns its submission callback. A single-stage executor accepts on invocation. */
+export interface ObjectiveRouteExecutor {
+	readonly reportsAdmission?: boolean;
+	execute(route: ObjectiveRoute, signal?: AbortSignal, submitted?: () => void): Promise<void>;
+}
+
+export const OBJECTIVE_WAIT_ROUTES: readonly string[] = ["wait_for_worker", "wait_for_tool"];
+export const SCOPE_REPLAN_EXECUTOR = "root:scope-replan";
+export const PENDING_WORKER_EXECUTOR = "worker:pending";
+export type RetrievalDisposition = "root" | "worker" | typeof PENDING_WORKER_EXECUTOR;
+export type WorkerRouteAdmission =
+	| { readonly started: true }
+	| { readonly started: false; readonly pending?: true; readonly reason: string };
+
+/** Scheduling and running a worker are separate durable transitions. A queued task retains ownership. */
+export function workerRouteAdmission(run: {
+	started?: boolean;
+	record?: unknown;
+	skipReason?: string;
+}): WorkerRouteAdmission {
+	const record = run.record && typeof run.record === "object" ? run.record : undefined;
+	const status = record && "status" in record ? record.status : undefined;
+	if (record && "firstStartedAt" in record && typeof record.firstStartedAt === "string" && record.firstStartedAt)
+		return { started: true };
+	if (status === "queued" || status === "running" || (!record && run.started))
+		return { started: false, pending: true, reason: "worker_admission_pending" };
+	return { started: false, reason: run.skipReason ?? "worker_not_started" };
+}
+
 export interface ObjectiveTerminalResult {
+	readonly goalCompletionKey?: string;
 	readonly status:
 		| "complete"
 		| "incomplete"
@@ -65,7 +95,8 @@ export interface ObjectiveTerminalResult {
 		| "budget_exhausted"
 		| "blocked"
 		| "unrecoverable"
-		| "semantic_gate_unavailable";
+		| "semantic_gate_unavailable"
+		| "executor_unavailable";
 	readonly reasonCodes: readonly string[];
 	readonly completionDecisionId?: string;
 	readonly cycleCount?: number;

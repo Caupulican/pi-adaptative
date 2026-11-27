@@ -2,11 +2,8 @@
  * Execution-plane coordinator for goal continuation, research, managed lanes, worker delegation,
  * and model fitness.
  *
- * Coordination state is owned by focused controllers. This coordinator retains one AgentSession
- * composition seam and a shared lane read model. Everything it needs
- * — the session manager, settings, model registry, live model, capability envelope, the goal
- * continuation LOOP, the isolated-completion primitive, spawned-usage accounting, and the telemetry
- * sink — is reached through narrow deps accessors rather than the whole AgentSession.
+ * Focused controllers own lane coordination. This session adapter supplies their dependencies
+ * and shares a lane read model with the foreground.
  *
  * Drive-loop boundary (deliberate): the idle triggers ({@link scheduleGoalAutoContinueFromIdle},
  * {@link scheduleResearchLaneFromIdle}) are invoked from the session's prompt tail as one-line
@@ -78,10 +75,7 @@ import {
 	type UpsertPersistentBotInput,
 	type UpsertPersistentTeamInput,
 } from "./delegation/persistent-bot-team-store.ts";
-import {
-	openSessionOrchestrationCore,
-	type SessionOrchestrationCore,
-} from "./delegation/session-orchestration-core.ts";
+import { SessionOrchestrationCoreCache } from "./delegation/session-orchestration-core.ts";
 import type {
 	SessionRootReply,
 	SessionRootReplyQuery,
@@ -144,6 +138,7 @@ import { blockedKnowledgeHandoff, type HandoffKnowledgePort } from "./memory/kno
 import { resolveCliModel } from "./model-resolver.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
+import { subscribeWorkerRouteStarts } from "./operator-projection/worker-route-starts.ts";
 import type { OrchestrationDelegationLimits, WorkerResultContract } from "./orchestration/contracts.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import { OrchestrationRetentionController } from "./orchestration/retention-controller.ts";
@@ -253,7 +248,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** The lifecycle's durable event store: every attempt transition commits through it. */
 	private _orchestrationStore: OrchestrationEventStore | undefined;
 	/** The store and lifecycle as the session opens them, before (or without) the worker composition. */
-	private _orchestrationCore: SessionOrchestrationCore | undefined;
+	private readonly _orchestrationCore = new SessionOrchestrationCoreCache(() => ({
+		orchestrationHome: this.deps.getOrchestrationHome(),
+		sessionId: this.deps.getSessionId(),
+		timers: this.deps.getTimers(),
+		identitySource: this.deps.getSessionManager(),
+	}));
 	/** Durable usage delivery shares the lifecycle's event store, independently of terminal handoffs. */
 	private _workerUsage: WorkerUsageReceiptDelivery | undefined;
 	private _workerReceipts: WorkerReceiptDelivery | undefined;
@@ -577,23 +577,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		});
 	}
 
-	/** The session's store and durable lifecycle, opened once; the retention pass reads it without the worker composition. */
-	private _getOrchestrationCore(): SessionOrchestrationCore {
-		this._orchestrationCore ??= openSessionOrchestrationCore({
-			orchestrationHome: this.deps.getOrchestrationHome(),
-			sessionId: this.deps.getSessionId(),
-			timers: this.deps.getTimers(),
-		});
-		return this._orchestrationCore;
-	}
-
 	private _getWorkerLifecycle(): WorkerLifecycle {
 		if (this._workerLifecycle) return this._workerLifecycle;
 		const parentSessionId = this.deps.getSessionId();
-		const { store, lifecycle } = this._getOrchestrationCore();
+		const { store, lifecycle } = this._orchestrationCore.get();
 		this._workerLifecycle = lifecycle;
 		this._orchestrationStore = store;
-		this._unsubscribeLaneRecordStore = store.subscribe(() => this._laneRecordsChanged());
+		this._unsubscribeLaneRecordStore = subscribeWorkerRouteStarts(store, lifecycle, this.deps, () =>
+			this._laneRecordsChanged(),
+		);
 		// Readiness can change without a ledger commit (an identical re-seal in a new process), so observers follow both.
 		this._unsubscribeHostEventState = lifecycle.ledger.runtime.hostEvents.subscribe(() => {
 			for (const listener of [...this._hostEventStateListeners]) listener();
@@ -831,7 +823,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined {
-		return this._workerLifecycle?.getTaskRuntimeSnapshot();
+		return (this._workerLifecycle ?? this._orchestrationCore.peek()?.lifecycle)?.getTaskRuntimeSnapshot();
 	}
 
 	getHostEventSubjects() {
@@ -910,9 +902,16 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._workerLifecycle?.getTaskRuntimeSnapshot().attempts[attemptId]?.result;
 	}
 
-	/** Reconcile only when delegation has already been materialized; UAC omission stays zero-load. */
+	hasDurableGoalObjective(goalId: string): boolean {
+		return this._orchestrationCore.hasGoalObjective(goalId);
+	}
 	synchronizeGoalState(goal: GoalState): void {
-		this._workers?.synchronizeGoalState(goal);
+		if (this._workers) this._workers.synchronizeGoalState(goal);
+		else {
+			const lifecycle = this._workerLifecycle ?? this._orchestrationCore.existing()?.lifecycle;
+			const changed = lifecycle?.synchronizeGoalState(goal);
+			if (this._workerLifecycle && changed?.length) this._replayPendingTerminals(this._workerLifecycle, () => true);
+		}
 		this._planExecutor?.noteGoalChanged();
 	}
 
@@ -2057,7 +2056,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				this.deps.getSettingsManager().getOrchestrationRetentionSettings().closedObjectiveDays,
 			capacity: () =>
 				this._hasWorkerState()
-					? this._getOrchestrationCore().lifecycle.ledger.runtime.getProjectionCapacity()
+					? this._orchestrationCore.get().lifecycle.ledger.runtime.getProjectionCapacity()
 					: undefined,
 			pass: () => this._retentionPassDeps(),
 			observeNotice: (read) => this.deps.observeHarnessNotice?.("orchestration-capacity", read),
@@ -2068,8 +2067,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	private _retentionPassDeps(): Omit<RetentionPassDeps, "warn"> {
 		return {
-			runtime: () => this._getOrchestrationCore().lifecycle.ledger.runtime,
-			store: () => this._getOrchestrationCore().store,
+			runtime: () => this._orchestrationCore.get().lifecycle.ledger.runtime,
+			store: () => this._orchestrationCore.get().store,
 			sessionId: this.deps.getSessionId(),
 			agentDir: this.deps.getAgentDir(),
 			orchestrationHome: this.deps.getOrchestrationHome(),

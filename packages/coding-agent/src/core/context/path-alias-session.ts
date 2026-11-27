@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { countHistoryWork } from "@caupulican/pi-ai/history-work";
+import { isLiteralCommittedToolReceipt } from "../../kernel/committed-tool-receipt.ts";
 import { readTransientRecordPayload } from "../../kernel/index.ts";
 import {
 	immutableHistoryMessage,
@@ -638,7 +639,8 @@ export class PathAliasRuntime {
 		// transient before any alias pass and becomes durable afterwards; rendering it then changed
 		// the bytes of an already-sent message (a skill record's base path, measured live), which
 		// broke the cached prefix and disengaged the delta path on the very next request.
-		if (message.role === "custom") {
+		// A submitted completion report names the exact unchecked files the owner will review.
+		if (message.role === "custom" || isLiteralCommittedToolReceipt(message)) {
 			state.rendered.push(message);
 			return;
 		}

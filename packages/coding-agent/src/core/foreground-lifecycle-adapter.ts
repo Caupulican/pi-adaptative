@@ -134,6 +134,10 @@ export class ForegroundLifecycleAdapter {
 		this.lifecycle.commitRoutedPromptPrefix();
 	}
 
+	commitRoutedMessages(): void {
+		this.lifecycle.commitRoutedMessages();
+	}
+
 	getPersistedMessageEntryId(message: AgentMessage): string | undefined {
 		return this.lifecycle.getPersistedMessageEntryId(message);
 	}

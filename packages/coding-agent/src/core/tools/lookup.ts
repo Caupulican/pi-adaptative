@@ -40,7 +40,10 @@ const lookupListSchema = Type.Pick(readSchema, ["path"]);
 
 const lookupFields = {
 	read: Type.Object({ read: lookupReadSchema }, { additionalProperties: false, description: "Read one file." }),
-	list: Type.Object({ list: lookupListSchema }, { additionalProperties: false, description: "List one directory." }),
+	list: Type.Object(
+		{ list: lookupListSchema },
+		{ additionalProperties: false, description: 'List one directory using {"list":{"path":"dir"}}.' },
+	),
 	repo: Type.Object({ repo: repoReadSchema }, { additionalProperties: false, description: "One repo_read git read." }),
 	search: Type.Object(
 		{ search: lookupSearchSchema },
@@ -66,7 +69,8 @@ function lookupSurface(available?: readonly string[]) {
 			requests: Type.Array(request, {
 				minItems: 1,
 				maxItems: MAX_LOOKUP_REQUESTS,
-				description: "Independent requests, each selecting one operation. Results come back in order.",
+				description:
+					"Independent requests, each with one operation key and its arguments nested inside that key. Results come back in order.",
 			}),
 		},
 		{ additionalProperties: false },

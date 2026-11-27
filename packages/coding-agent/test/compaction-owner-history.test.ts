@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { type AssistantMessage, createEmptyUsage } from "@caupulican/pi-ai";
 import { afterEach, expect, it } from "vitest";
 import { compactionOwnerContext, projectCompactionOwnerHistory } from "../src/core/compaction/owner-context.ts";
+import { captureWorkerReceiptOrigin } from "../src/core/delegation/worker-receipt-origin.ts";
 import { OwnerEvidenceLedger } from "../src/core/learning/owner-evidence-ledger.ts";
 import type { OwnerInputId } from "../src/core/owner-input-ledger.ts";
 import {
@@ -25,6 +26,7 @@ import {
 } from "../src/kernel/compaction/owner-history.ts";
 import { verifySummary } from "../src/kernel/compaction/verification.ts";
 import { stampOwnerInput } from "../src/kernel/owner-input-stamp.ts";
+import { parentInputMessage } from "../src/kernel/session/parent-input-ledger.ts";
 import { ownerSessionStorageRoots } from "../src/kernel/session/session-bundle-paths.ts";
 import type { SessionEntry } from "../src/kernel/session/session-entries.ts";
 import { buildSessionContext, SessionManager } from "../src/kernel/session/session-manager.ts";
@@ -410,4 +412,38 @@ it("counts the historical suffix still on the live wire before stripping it from
 	expect(prepared.tokensBefore).toBe(estimateContextTokens(wire).tokens);
 	expect(estimateContextTokens(prepared.messagesToSummarize).tokens).toBeLessThan(prepared.tokensBefore);
 	expect(JSON.stringify(prepared.messagesToSummarize)).not.toContain("<compaction-owner-history");
+});
+
+it("keeps held and skipped note bodies out of checkpoints and recovers the held note for its next owner", () => {
+	const world = fixture();
+	world.owner("Complete the current task.");
+	for (const id of ["pending", "skipped"]) {
+		world.manager.appendParentInput(
+			parentInputMessage(
+				{
+					deliveryId: id,
+					mode: "next-owner-turn",
+					payloadDigest: "a".repeat(64),
+					origin: captureWorkerReceiptOrigin(world.manager),
+				},
+				{ customType: "work-note", content: `Private ${id} observation.`, display: true },
+			),
+		);
+	}
+	expect(world.manager.skipPendingParentInput("skipped", "Producer withdrew the observation")).toBe(true);
+	world.answer("Current task completed.");
+	const prepared = prepare(world.manager);
+	expect(JSON.stringify(prepared.messagesToSummarize)).toContain("Current task completed.");
+	expect(JSON.stringify(prepared)).not.toMatch(/Private (?:skipped|pending) observation/);
+	const held = world.manager.getPendingParentInputs("next-owner-turn")[0]!;
+	save(world.manager, prepared);
+	world.reopen();
+	expect(world.manager.getPendingParentInputs("next-owner-turn")).toEqual([held]);
+	expect(world.manager.getSkippedParentInputIds()).toContain("skipped");
+	const ownerEntry = world.manager.getEntry(world.owner("What did the background work find?"));
+	if (ownerEntry?.type !== "message" || !ownerEntry.ownerInputId) throw Error("Missing persisted owner");
+	world.manager.authorizeParentNoteOwner(ownerEntry.ownerInputId, 1);
+	const selection = world.manager.captureParentNotes(world.manager.buildSessionContext().messages, 1);
+	expect(selection?.inputs.map((item) => item.entryId)).toEqual([held.entryId]);
+	expect(selection?.messages.map((item) => item.content)).toEqual(["Private pending observation."]);
 });

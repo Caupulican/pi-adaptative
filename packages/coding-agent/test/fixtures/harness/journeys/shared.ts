@@ -453,7 +453,8 @@ export function bindE0Request(
  * carries a matrix field counts once for that field, so an empty matrix is proven transported by its branch count. When the acceptance
  * matrix is transported, each row must name the native store criterion and the native goal requirement of the same id, with the store's
  * required, status and evidence ids, and the requirement's text. The selected outcome row for the integration observation must be the
- * criterion of the requirement that cites the admitted integration evidence, and carry that requirement's text and the admitted summary.
+ * criterion of the requirement that cites the admitted integration evidence, and carry that requirement's text and the producing tool's
+ * command and observed output. The model's evidence summary cannot substitute for that observation.
  * The verification matrix, when transported, must name exactly the store's runs by id, status and covered acceptance ids.
  */
 export function bindE0Completion(
@@ -462,6 +463,7 @@ export function bindE0Completion(
 	requirements: readonly { readonly id: string; readonly text: string; readonly evidenceIds: readonly string[] }[],
 	integration: { readonly id: string; readonly uri?: string },
 	counters: E0Counters,
+	verification: { readonly command: string; readonly output: string },
 ): void {
 	if (!isRecordObject(request.state)) return;
 	const state = request.state;
@@ -470,7 +472,11 @@ export function bindE0Completion(
 			o.freshness === "fresh" && o.source.content_hash === integration.id && o.source.locator === integration.uri,
 	);
 	if (observation === undefined) return;
-	const summary = "vitest passed: MAX_RETRIES is 5 and the late module is landed";
+	const observed = [
+		`Tool bash, receipt ${integration.uri}, completed successfully.`,
+		`Operation: ${verification.command}`,
+		`Observed output: ${verification.output}`,
+	].join("\n");
 	if (Array.isArray(state.acceptance_matrix)) {
 		counters.acceptanceMatrixRequests += 1;
 		for (const row of state.acceptance_matrix) {
@@ -504,7 +510,9 @@ export function bindE0Completion(
 					throw new Error(`the completion evidence reference ${reference.id} does not resolve uniquely`);
 				}
 				if (item.id !== observation.id) continue;
-				expect(item.text, "the selected integration row carries its admitted summary text").toBe(summary);
+				expect(item.text, "the selected integration row carries its actual command and observed output").toBe(
+					observed,
+				);
 				expect(item.trust, "the selected integration row carries its store trust").toBe(observation.source.trust);
 				expect(
 					observation.source.locator,
@@ -1402,6 +1410,18 @@ export const NOTES_V1 = "stage one\n";
 export const OWNER_DRAFT_DIRTY = "owner draft v2 (unstaged, not mine)\n";
 
 export const ICM_CREDENTIAL_KEY = ["AIza", "0123456789abcdefghijklmnopqrstuvwxy"].join("");
+
+/** Advisory supervision sees the worker making progress on its assigned task. */
+export const ON_TRACK_WORKER_JUDGMENTS = {
+	meaningful_progress: { kind: "noul", probability: 0.97 },
+	worker_stuck: { kind: "noul", probability: 0.02 },
+	work_off_track: { kind: "noul", probability: 0.02 },
+	strategy_repetition: { kind: "noul", probability: 0.02 },
+	needs_independent_verification: { kind: "noul", probability: 0.02 },
+	specialist_gap_present: { kind: "noul", probability: 0.02 },
+	capability_gap_present: { kind: "noul", probability: 0.02 },
+	external_block_present: { kind: "noul", probability: 0.02 },
+} as const;
 
 /**
  * The judgments an owner request that leads to a tool call asks while no grant is pending. A declared judgment nobody

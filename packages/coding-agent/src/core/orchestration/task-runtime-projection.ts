@@ -2,6 +2,7 @@ import { HOST_EVENT_RECORD_LIMITS, hostEventCapacity } from "../events/host-even
 import { emptyHostEventProjection, HOST_EVENT_RECORD_FIELDS } from "../events/host-event-state.ts";
 import { PLAN_LIMITS } from "../plan/plan-graph.ts";
 import {
+	type EvidenceContract,
 	MAX_ORCHESTRATION_AGENT_BINDINGS,
 	MAX_ORCHESTRATION_APPROVALS,
 	MAX_ORCHESTRATION_ATTEMPTS,
@@ -11,13 +12,13 @@ import {
 	MAX_ORCHESTRATION_EVIDENCE,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_ORCHESTRATION_NOTIFICATIONS,
-	MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE,
 	MAX_ORCHESTRATION_OBJECTIVES,
 	MAX_ORCHESTRATION_PROJECTION_BYTES,
 	MAX_ORCHESTRATION_RETAINED_RECORD_BYTES,
 	MAX_ORCHESTRATION_TASKS,
 } from "./contracts.ts";
 import { projectionRecordForStorage } from "./dispatch-storage.ts";
+import { assertObjectiveEvidenceCapacity, objectiveEvidenceCounts } from "./objective-evidence-capacity.ts";
 import {
 	DurableTaskRuntimeError,
 	type ObjectiveRuntimeState,
@@ -285,20 +286,9 @@ export function assertIdentifierListHasCapacity(values: readonly string[], limit
 export function assertObjectiveEvidenceHasCapacity(
 	objectives: Readonly<Record<string, ObjectiveRuntimeState>>,
 	objective: ObjectiveRuntimeState,
+	incoming: EvidenceContract,
 ): void {
-	if (objective.evidence.length >= MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE) {
-		throw new DurableTaskRuntimeError(
-			`Orchestration objective evidence limit (${MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE}) reached.`,
-		);
-	}
-	let count = 0;
-	for (const objectiveId in objectives) {
-		if (!Object.hasOwn(objectives, objectiveId)) continue;
-		count += objectives[objectiveId]?.evidence.length ?? 0;
-		if (count >= MAX_ORCHESTRATION_EVIDENCE) {
-			throw new DurableTaskRuntimeError(`Orchestration evidence limit (${MAX_ORCHESTRATION_EVIDENCE}) reached.`);
-		}
-	}
+	assertObjectiveEvidenceCapacity(objectives, { ...objective, evidence: [...objective.evidence, incoming] });
 }
 
 export function assertBoundedIdentifierList(
@@ -347,15 +337,11 @@ export function assertRetainedProjectionNestedCollections(
 		if (!Array.isArray(objective.evidence)) {
 			throw new DurableTaskRuntimeError(`${label}.objectives.${objectiveId}.evidence must be an array.`);
 		}
-		if (objective.evidence.length > MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE) {
+		evidenceCount += objectiveEvidenceCounts(objectiveId, objective.evidence).independent;
+		if (evidenceCount > MAX_ORCHESTRATION_EVIDENCE)
 			throw new DurableTaskRuntimeError(
-				`Orchestration objective evidence limit (${MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE}) exceeded.`,
+				`Orchestration independent evidence limit (${MAX_ORCHESTRATION_EVIDENCE}) exceeded.`,
 			);
-		}
-		evidenceCount += objective.evidence.length;
-		if (evidenceCount > MAX_ORCHESTRATION_EVIDENCE) {
-			throw new DurableTaskRuntimeError(`Orchestration evidence limit (${MAX_ORCHESTRATION_EVIDENCE}) exceeded.`);
-		}
 	}
 	for (const taskId in tasks) {
 		if (!Object.hasOwn(tasks, taskId)) continue;

@@ -4,7 +4,7 @@
  */
 
 import { parseTurnOriginRecord, type TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
-import { parseBoundedStringArray } from "./bounded-string-array.ts";
+import { dispatchIdentifierArray } from "./codec-primitives.ts";
 import {
 	type AgentBindingContract,
 	type AgentPrunedTurns,
@@ -80,16 +80,10 @@ function lastPrunedTurnFromValue(
 	if (!ATTEMPT_STATUSES.some((candidate) => candidate === status)) {
 		throw new DurableTaskRuntimeError(`${label}.status is invalid.`);
 	}
-	// Absent in a carry written before the basis carried its criteria, which reads as none. The bounds match the task's own
-	// id list (`dispatchIdentifierArray` in task-runtime-codecs.ts), which this module cannot import.
-	const acceptanceCriterionIds =
-		last.acceptanceCriterionIds === undefined
-			? []
-			: parseBoundedStringArray(last.acceptanceCriterionIds, {
-					invalidMessage: `${label}.acceptanceCriterionIds must be a bounded identifier array.`,
-					duplicateMessage: `${label}.acceptanceCriterionIds contains duplicates.`,
-					createError: (message) => new DurableTaskRuntimeError(message),
-				});
+	const acceptanceCriterionIds = dispatchIdentifierArray(
+		last.acceptanceCriterionIds === undefined ? [] : last.acceptanceCriterionIds,
+		`${label}.acceptanceCriterionIds`,
+	);
 	// attemptTurnOrigin(last): usually the dispatch's own origin, which is not third-party, so the generic parser applies.
 	let ownTurnOrigin: TurnOriginRecord | undefined;
 	if (last.ownTurnOrigin !== undefined) {

@@ -26,6 +26,7 @@ import {
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
 import { isLeaderDelegationObjectiveId } from "../orchestration/delegation-ledger.ts";
+import { type ObjectiveRouteOrigin, objectiveRouteOriginFields } from "../orchestration/dispatch-request-fields.ts";
 import type { ModelTransferRecord } from "../orchestration/model-transfer.ts";
 import {
 	type SessionBundleDeletionReservation,
@@ -134,6 +135,7 @@ export interface WorkerAgentMessageEnvelope {
  * before the message is enqueued, so recovery after a restart needs no copy of the goal state.
  */
 export interface WorkerAgentNewTaskCorrelation {
+	objectiveRouteOrigin?: ObjectiveRouteOrigin;
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	subscriptions?: readonly HostEventSubscriptionInput[];
 	/** Host-admitted command declaration; never re-derived from a later parent snapshot. */
@@ -357,15 +359,7 @@ export interface WorkerAgentTaskStartOptions extends WorkerAgentControlScope {
 	 * specialist's prior task. An empty object is still a declaration: work that belongs to no goal
 	 * is bound to session scope, never to the goal this specialist happened to run first.
 	 */
-	newTask?: {
-		knowledgeReferences?: readonly KnowledgeGrantReference[];
-		subscriptions?: readonly HostEventSubscriptionInput[];
-		controlForkMode?: string;
-		goal?: GoalState;
-		requirementIds?: readonly string[];
-		acceptanceCriterionIds?: readonly string[];
-		resourcePointerIds?: readonly string[];
-	};
+	newTask?: Omit<WorkerAgentNewTaskCorrelation, "goalId"> & { goal?: GoalState };
 }
 
 export interface WorkerAgentTranscriptOptions extends WorkerAgentControlScope {
@@ -1162,6 +1156,7 @@ function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation
 	if (
 		!Object.keys(correlation).every(
 			(field) =>
+				field === "objectiveRouteOrigin" ||
 				field === "goalId" ||
 				field === "controlForkMode" ||
 				field === "requirementIds" ||
@@ -1177,6 +1172,7 @@ function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation
 		throw new Error("Worker agent mailbox contains invalid new-task correlation metadata.");
 	}
 	return normalizeWorkerAgentNewTaskCorrelation({
+		...objectiveRouteOriginFields(correlation.objectiveRouteOrigin),
 		...(correlation.subscriptions === undefined
 			? {}
 			: {
@@ -1251,6 +1247,7 @@ export function normalizeWorkerAgentNewTaskCorrelation(
 					"new task subscriptions",
 				);
 	return {
+		...objectiveRouteOriginFields(value.objectiveRouteOrigin),
 		...(subscriptions === undefined ? {} : { subscriptions }),
 		...(knowledgeReferences.length > 0 ? { knowledgeReferences } : {}),
 		...(goalId ? { goalId } : {}),

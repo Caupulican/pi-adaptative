@@ -2002,7 +2002,10 @@ export async function runJourney4TelegramWaitingPhase(world: HarnessWorld): Prom
 				expect(result?.text, "the third party's push is prepared, not run").toContain(
 					`Prepared, not run: ${command} (git.publish`,
 				);
-				expect(result?.text, "the hold names its draft").toContain("It is kept as draft draft-");
+				expect(result?.text, "the hold names its draft").toMatch(/Draft draft-[0-9a-f]+ records the held action/);
+				expect(result?.text, "the held action requires a fresh authorized call").toContain(
+					"A reply or grant alone does not execute it.",
+				);
 				held.release();
 			},
 			reply: { content: [{ type: "text", text: "The push waits for the owner." }] },

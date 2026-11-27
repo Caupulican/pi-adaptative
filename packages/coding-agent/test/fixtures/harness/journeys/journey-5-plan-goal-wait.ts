@@ -31,7 +31,7 @@ const TITLE = "Watch the retry limit from two angles and combine the readings";
 const FIRST = "watch-first";
 const SECOND = "watch-second";
 const SUMMARY = "watch-summary";
-const GOAL = "Keep the retry limit documented.";
+const GOAL = "Watch the retry limit from two angles and combine the readings.";
 const GOAL_ID = `${LABEL}-goal`;
 const TIMEOUT_TURN_TOKENS = 2_000;
 const TEN_MINUTES_MS = 600_000;
@@ -163,12 +163,7 @@ export async function runJourney5PlanGoalWaitPhase(world: HarnessWorld): Promise
 		},
 		planResult,
 	);
-	await withDeadline(
-		trace,
-		`${LABEL} turn`,
-		session.prompt("Watch the retry limit from two angles and combine the readings."),
-		90_000,
-	);
+	await withDeadline(trace, `${LABEL} turn`, session.prompt(GOAL), 90_000);
 	await withDeadline(trace, `${LABEL}: the plan started`, started.promise, 90_000);
 	await withDeadline(
 		trace,

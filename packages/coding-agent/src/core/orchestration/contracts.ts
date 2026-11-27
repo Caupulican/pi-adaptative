@@ -1,6 +1,7 @@
 import type { AgentIdentityContract, ResourcePointer } from "../../kernel/session/agent-identity.ts";
 import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
 import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
+import type { ObjectiveRouteOrigin } from "./dispatch-request-fields.ts";
 import type { WorkerReceiptOrigin } from "./worker-receipt-origin.ts";
 import type { WorkerResultReceipts } from "./worker-result-receipts.ts";
 
@@ -41,6 +42,8 @@ export const MAX_ORCHESTRATION_DESCRIPTION_LENGTH = 4 * 1024;
 /** Worker terminal summaries use the same inline byte ceiling as ordinary tool output. */
 export const MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES = DEFAULT_MAX_BYTES;
 export const MAX_ORCHESTRATION_COLLECTION_LENGTH = 64;
+/** Goal requirements and their durable objective criteria share this cardinality bound. */
+export const MAX_ORCHESTRATION_ACCEPTANCE_CRITERIA = 256;
 export const MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH = 16 * 1024;
 
 /**
@@ -68,8 +71,11 @@ export const MAX_ORCHESTRATION_APPROVALS = 256;
 export const MAX_ORCHESTRATION_NOTIFICATIONS = 1024;
 /** Parent writes one attempt's away run may hold until the parent imports them: claims, notices and reports. */
 export const MAX_ORCHESTRATION_ATTEMPT_PARENT_WRITES = 16;
-/** Source goal state admits at most 512 evidence entries for one objective. */
+/** Independent observations keep their original quota; goal coverage has a separate bounded slot per criterion. */
 export const MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE = 512;
+export const MAX_ORCHESTRATION_OBJECTIVE_GOAL_COVERAGE = MAX_ORCHESTRATION_ACCEPTANCE_CRITERIA;
+export const MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE_ROWS =
+	MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE + MAX_ORCHESTRATION_OBJECTIVE_GOAL_COVERAGE;
 export const MAX_ORCHESTRATION_EVIDENCE = 4_096;
 export const MAX_ORCHESTRATION_CHECKPOINT_SUMMARY_LENGTH = 4 * 1024;
 /** Absolute lineage bound retained for legacy durable-record recovery. New native workers are leaves. */
@@ -397,6 +403,7 @@ export interface ManagedLanePlacement {
 }
 
 export interface OrchestrationDispatchRequest {
+	readonly objectiveRouteOrigin?: ObjectiveRouteOrigin;
 	taskId: string;
 	/** Owner-selected exact canonical references, scoped to this task rather than the persistent worker. */
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
@@ -421,6 +428,8 @@ export interface OrchestrationDispatchRequest {
 	parentAgentId?: string;
 	/** Runtime-owned goal/task correlation. Omitted by legacy records and normalized to an empty list. */
 	requirementIds?: readonly string[];
+	/** Current requirement definitions captured when the worker's objective admitted this dispatch. */
+	goalRequirementKeys?: readonly string[];
 	/** Execution owner. Omitted on legacy records and normalized to in-process. */
 	executionKind?: "in-process" | "managed-process";
 	/** Stable external lane identity shared by successive managed-process turns. */
@@ -665,7 +674,9 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"task.subscriptions_replaced",
 	"objective.created",
 	"objective.updated",
+	"objective.goal_reconciled",
 	"objective.evidence_recorded",
+	"objective.evidence_withdrawn",
 	"objective.paused",
 	"objective.resumed",
 	"objective.completed",

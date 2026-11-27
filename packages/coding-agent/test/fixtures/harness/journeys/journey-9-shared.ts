@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import type { Outcome } from "../../../../src/core/delegation/worker-outcome.ts";
@@ -210,8 +211,8 @@ export function scriptRequirementCheckSpawn(
 			pid: 0,
 			exitCode: null as number | null,
 			signalCode: null as NodeJS.Signals | null,
-			stdout: new EventEmitter(),
-			stderr: new EventEmitter(),
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
 			kill: () => world.processTable.signal(child.pid, "SIGTERM"),
 		});
 		let closed = false;
@@ -221,6 +222,8 @@ export function scriptRequirementCheckSpawn(
 			child.exitCode = code;
 			child.signalCode = signal;
 			world.processTable.releaseChild(child.pid);
+			child.stdout.end();
+			child.stderr.end();
 			child.emit("exit", code, signal);
 			child.emit("close", code, signal);
 		};
@@ -233,7 +236,9 @@ export function scriptRequirementCheckSpawn(
 		});
 		void world.shell
 			.exec(invoked, options?.cwd ?? HARNESS_PROJECT_CWD, {
-				onData: (chunk) => child.stdout.emit("data", Buffer.from(chunk)),
+				onData: (chunk) => {
+					if (!closed) child.stdout.write(Buffer.from(chunk));
+				},
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.env ? { env: options.env } : {}),
 			})

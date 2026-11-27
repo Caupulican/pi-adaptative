@@ -17,6 +17,8 @@ import {
 	initializeOwnerPreferenceAttestations,
 	OwnerPreferenceAttestationStore,
 } from "../memory/owner-preference-attestations.ts";
+import { OBJECTIVE_WAIT_ROUTES } from "../objective-execution/objective-route.ts";
+import type { ObjectiveRouteOrigin } from "../orchestration/dispatch-request-fields.ts";
 import { initializeOrdinaryWorkSchema, OrdinaryWorkStore } from "../ordinary-work-store.ts";
 import { getParentPid } from "../process-identity.ts";
 import { getSessionRole, type SessionRole } from "../session-role.ts";
@@ -37,6 +39,11 @@ import type {
 	DecisionStageStoredEntry,
 } from "./decision-stage-log.ts";
 import { isLegacyIdleStageRow } from "./decision-stage-log.ts";
+import type { RouteDecisionRow } from "./types.ts";
+import { writeRecoveredWorkerRouteStarts } from "./worker-route-starts.ts";
+
+export type { RouteDecisionRow } from "./types.ts";
+
 import { asInteger, asText, semanticEvaluationRows } from "./semantic-evaluation-row.ts";
 
 export const DECISION_LEDGER_SCHEMA_VERSION = 1;
@@ -141,19 +148,6 @@ export interface LineageEpisodeRow {
 	readonly lineage: string;
 	readonly requests: number;
 	readonly lastObservedAt: number;
-}
-
-export interface RouteDecisionRow {
-	readonly sessionId: string;
-	readonly cwd: string;
-	readonly objectiveId: string;
-	readonly cycleId: string;
-	readonly route: string;
-	readonly reasonCodes: readonly string[];
-	readonly decidedAt: number;
-	/** A monotone proxy for "new evidence since": objective evidence plus tasks plus attempts. */
-	readonly evidenceMarker: number;
-	readonly executor?: string;
 }
 
 /**
@@ -311,9 +305,11 @@ export class DecisionLedgerStore {
 				reason_codes TEXT NOT NULL,
 				decided_at INTEGER NOT NULL,
 				evidence_marker INTEGER NOT NULL,
-				executor TEXT
+				executor TEXT,
+				work_key TEXT
 			);
 			CREATE INDEX IF NOT EXISTS route_decisions_objective ON route_decisions (session_id, objective_id, id);
+			CREATE INDEX IF NOT EXISTS route_decisions_cycle ON route_decisions (session_id, cycle_id);
 			CREATE TABLE IF NOT EXISTS cache_observations (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				session_id TEXT NOT NULL,
@@ -419,12 +415,14 @@ export class DecisionLedgerStore {
 					initializeOwnerPreferenceAttestations(database);
 					// Serialize the schema check and alteration across every process sharing this ledger.
 					// Ledgers created before observations carried these columns gain them; their rows stay unassigned.
-					const columns = new Set(
-						database
-							.prepare("PRAGMA table_info(cache_observations)")
-							.all()
-							.map((column) => column.name),
-					);
+					const tableColumns = (table: string) =>
+						new Set(
+							database
+								.prepare(`PRAGMA table_info(${table})`)
+								.all()
+								.map((column) => column.name),
+						);
+					const columns = tableColumns("cache_observations");
 					for (const column of ["lineage", "holder", "cache_policy", "measured_cache_policy"]) {
 						if (!columns.has(column)) database.exec(`ALTER TABLE cache_observations ADD COLUMN ${column} TEXT`);
 					}
@@ -434,12 +432,7 @@ export class DecisionLedgerStore {
 					database.exec(
 						"CREATE INDEX IF NOT EXISTS cache_observations_measured_at ON cache_observations (observed_at) WHERE measured_cache_policy IS NOT NULL",
 					);
-					const evaluationColumns = new Set(
-						database
-							.prepare("PRAGMA table_info(semantic_evaluations)")
-							.all()
-							.map((column) => column.name),
-					);
+					const evaluationColumns = tableColumns("semantic_evaluations");
 					for (const column of [
 						"scope_kind",
 						"scope_id",
@@ -452,24 +445,15 @@ export class DecisionLedgerStore {
 					])
 						if (!evaluationColumns.has(column))
 							database.exec(`ALTER TABLE semantic_evaluations ADD COLUMN ${column} TEXT`);
-					if (
-						!database
-							.prepare("PRAGMA table_info(semantic_doubt_decisions)")
-							.all()
-							.some((column) => column.name === "worker_task_fit")
-					)
+					if (!tableColumns("semantic_doubt_decisions").has("worker_task_fit"))
 						database.exec(
 							"ALTER TABLE semantic_doubt_decisions ADD COLUMN worker_task_fit TEXT CHECK (worker_task_fit IN ('adequate', 'inadequate'))",
 						);
 					// Effect readings are a shared cache, but each now records the session that wrote it; earlier rows stay unassigned.
-					const effectColumns = new Set(
-						database
-							.prepare("PRAGMA table_info(operation_effects)")
-							.all()
-							.map((column) => column.name),
-					);
-					if (!effectColumns.has("session_id"))
+					if (!tableColumns("operation_effects").has("session_id"))
 						database.exec("ALTER TABLE operation_effects ADD COLUMN session_id TEXT");
+					if (!tableColumns("route_decisions").has("work_key"))
+						database.exec("ALTER TABLE route_decisions ADD COLUMN work_key TEXT");
 					database
 						.prepare("INSERT OR IGNORE INTO ledger_meta (key, value) VALUES ('schema_version', ?)")
 						.run(String(DECISION_LEDGER_SCHEMA_VERSION));
@@ -1117,8 +1101,8 @@ export class DecisionLedgerStore {
 		this.attributeSession(row.sessionId);
 		this.database
 			.prepare(
-				`INSERT INTO route_decisions (session_id, cwd, objective_id, cycle_id, route, reason_codes, decided_at, evidence_marker)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO route_decisions (session_id, cwd, objective_id, cycle_id, route, reason_codes, decided_at, evidence_marker, work_key)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				row.sessionId,
@@ -1129,20 +1113,30 @@ export class DecisionLedgerStore {
 				JSON.stringify(row.reasonCodes),
 				row.decidedAt,
 				row.evidenceMarker,
+				row.workKey ?? null,
 			);
 	}
 
-	noteRouteExecutor(sessionId: string, cycleId: string, executor: string): void {
+	noteRouteExecutor(sessionId: string, cycleId: string, executor: string, objectiveId?: string): void {
 		this.database
-			.prepare("UPDATE route_decisions SET executor = ? WHERE session_id = ? AND cycle_id = ?")
-			.run(executor, sessionId, cycleId);
+			.prepare(`UPDATE route_decisions SET executor = ? WHERE session_id = ? AND cycle_id = ? AND (? IS NULL OR objective_id = ?)
+				AND (SELECT COUNT(*) FROM route_decisions WHERE session_id = ? AND cycle_id = ?) = 1
+				AND (executor IS NULL OR executor = 'retrieve')`)
+			.run(executor, sessionId, cycleId, objectiveId ?? null, objectiveId ?? null, sessionId, cycleId);
+	}
+
+	/** Recover the first start of each route from its immutable attempt origin and start witness. */
+	recoverWorkerRouteStarts(sessionId: string, starts: readonly ObjectiveRouteOrigin[]): void {
+		writeRecoveredWorkerRouteStarts(this.database, sessionId, starts);
 	}
 
 	/** The objective's recent routes, oldest first, bounded. */
-	recentRoutes(sessionId: string, objectiveId: string, limit: number): RouteDecisionRow[] {
+	recentRoutes(sessionId: string, objectiveId: string, limit: number, strategyOnly = false): RouteDecisionRow[] {
 		const rows = this.database
-			.prepare("SELECT * FROM route_decisions WHERE session_id = ? AND objective_id = ? ORDER BY id DESC LIMIT ?")
-			.all(sessionId, objectiveId, Math.max(1, Math.floor(limit)));
+			.prepare(
+				"SELECT * FROM route_decisions WHERE session_id = ? AND objective_id = ? AND (? = 0 OR (executor IS NOT NULL AND route NOT IN (?, ?))) ORDER BY id DESC LIMIT ?",
+			)
+			.all(sessionId, objectiveId, Number(strategyOnly), ...OBJECTIVE_WAIT_ROUTES, Math.max(1, Math.floor(limit)));
 		const out: RouteDecisionRow[] = [];
 		for (const row of rows) {
 			const cwd = asText(row.cwd);
@@ -1175,6 +1169,7 @@ export class DecisionLedgerStore {
 				reasonCodes,
 				decidedAt,
 				evidenceMarker,
+				workKey: asText(row.work_key),
 				...(executor !== undefined ? { executor } : {}),
 			});
 		}

@@ -5,6 +5,26 @@
 
 import { createHash } from "node:crypto";
 
+import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+
+/** A stable digest of the objective definition and accepted evidence. New attempts alone have no effect. */
+export function evidenceMarkerOf(snapshot: TaskRuntimeProjection | undefined, objectiveId: string): number {
+	const objective = snapshot?.objectives[objectiveId];
+	const evidence = objective?.evidence.filter((item) => item.trusted) ?? [];
+	evidence.sort((left, right) => left.evidenceId.localeCompare(right.evidenceId));
+	const cursor = objective?.goalSource;
+	const subject = [
+		objective?.objective.description,
+		objective?.objective.acceptanceCriteria,
+		cursor?.lastCorrection?.ownerEntryId,
+		cursor?.correctedOutcomeProof,
+		evidence,
+	];
+	const digest = createHash("sha256").update(JSON.stringify(subject)).digest();
+	// Use a separate numeric range from the legacy count, within SQLite's exact JavaScript integer range.
+	return 2 ** 48 + digest.readUIntBE(0, 6);
+}
+
 export interface StallEvaluation {
 	readonly stalled: boolean;
 	readonly stallTurns: number;
@@ -40,8 +60,8 @@ export class ObjectiveStallDetector {
 	}): string {
 		const norm = {
 			route: action.route,
-			reqs: [...(action.targetRequirementIds ?? [])].sort(),
-			hyps: [...(action.targetHypothesisIds ?? [])].sort(),
+			reqs: action.targetRequirementIds && [...new Set(action.targetRequirementIds)].sort(),
+			hyps: action.targetHypothesisIds && [...new Set(action.targetHypothesisIds)].sort(),
 			acts: [...(action.plannedActions ?? [])].sort(),
 		};
 		return createHash("sha256").update(JSON.stringify(norm)).digest("hex").slice(0, 16);

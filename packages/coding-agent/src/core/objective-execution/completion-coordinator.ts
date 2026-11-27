@@ -8,6 +8,7 @@ import { buildCompletionProof } from "../system-one/completion-proof.ts";
 
 import { execSync } from "node:child_process";
 import type { CompletionAssuranceProfile } from "../decision/policy.ts";
+import { objectiveNeedsCorrectedOutcome, provenObjectiveCriterionIds } from "../orchestration/objective-criteria.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import {
 	buildDeliveryBundle,
@@ -225,19 +226,22 @@ export class CompletionCoordinator {
 		}
 
 		const objective = context.runtime.objectives[objectiveId];
-		const rawCriteria =
-			objective?.objective.acceptanceCriteria ??
-			(objective?.objective as { acceptance_criteria?: readonly (string | { id: string })[] })
-				?.acceptance_criteria ??
-			[];
-		const requiredCriteria = rawCriteria.map((c) => (typeof c === "string" ? c : c.id));
+		const requiredCriteria = (objective?.objective.acceptanceCriteria ?? [])
+			.filter((criterion) => criterion.required)
+			.map((criterion) => criterion.id);
 		const evidenceList = objective?.evidence ?? [];
-		for (const criterion of requiredCriteria) {
-			const resolved = evidenceList.some((entry) => {
-				const record = entry as { criterionId?: string; requirement_id?: string; evidenceId?: string };
-				return record.criterionId === criterion || record.requirement_id === criterion;
+		const proven = objective && provenObjectiveCriterionIds(objective);
+		if (objectiveNeedsCorrectedOutcome(objective)) {
+			failedGates.push("corrected_outcome_unverified");
+			deterministicGateRecords.push({
+				gateId: "corrected_outcome",
+				status: "failed",
+				required: true,
+				detail: "The amended objective still needs outcome proof.",
 			});
-			if (!resolved) {
+		}
+		for (const criterion of requiredCriteria) {
+			if (!proven?.has(criterion)) {
 				failedGates.push(`criterion_unresolved:${criterion}`);
 				deterministicGateRecords.push({
 					gateId: `criterion:${criterion}`,

@@ -24,8 +24,7 @@ import {
 const GOAL_BOT = "pool-keeper";
 const SOUL = "You keep the connection pool's limit documented and answer the owner in one sentence.";
 const GOAL_ID = "j7-bot-goal";
-const GOAL = "Document the connection pool's limit of eight connections.";
-const ASK = "Keep the connection pool's limit documented as a goal of your own.";
+const ASK = "Keep the connection pool's limit of eight connections documented as a goal of your own.";
 const STARTED = "The goal to document the pool's limit is started.";
 const ANSWER = "The pool's limit of eight connections is documented, and the goal is complete.";
 /** The owner's continuation delay, at its maximum: the wake's wall timer stays far beyond the leg. */
@@ -41,15 +40,14 @@ const CLOSED_BOT = "pool-auditor";
 const CLOSED_SOUL = "You audit the connection pool's idle timeout and answer the owner in one sentence.";
 const CLOSED_TRACK = "j7-closed-goal-bot";
 const CLOSED_GOAL_ID = "j7-closed-bot-goal";
-const CLOSED_GOAL = "Document the connection pool's idle timeout of thirty seconds.";
-const CLOSED_ASK = "Keep the connection pool's idle timeout documented as a goal of your own.";
+const CLOSED_ASK = "Keep the connection pool's idle timeout of thirty seconds documented as a goal of your own.";
 const CLOSED_STARTED = "The goal to document the pool's idle timeout is started.";
 const CLOSED_ANSWER = "The pool's idle timeout of thirty seconds is documented, and the goal is complete.";
 
 /** What the closed bot's requests showed, read by both of its legs. */
 interface ClosedBotSeen {
 	holdsGoal: boolean;
-	started: boolean | undefined;
+	startReceipt?: ReturnType<typeof goalResult>;
 	carried: boolean | undefined;
 	refused: boolean | undefined;
 	completed: boolean | undefined;
@@ -98,11 +96,11 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	world.systemOne.enterPhase("j7-bot-goal", {});
 	expect(world.timers.armedDelays(WAKE_OWNER), "no goal continuation is armed before the bot's goal").toEqual([]);
 	createOwnerBot(session, GOAL_BOT, MODEL_ID.goalBot, SOUL);
-	const seen = {
+	const seen: ClosedBotSeen = {
 		holdsGoal: false,
-		started: undefined as boolean | undefined,
-		refused: undefined as boolean | undefined,
-		completed: undefined as boolean | undefined,
+		carried: undefined,
+		refused: undefined,
+		completed: undefined,
 	};
 	enqueueBot(
 		world,
@@ -114,12 +112,12 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			check: (request) => {
 				seen.holdsGoal = offeredTools(request).includes("goal");
 			},
-			reply: goalCall("j7-goal-bot-start", { action: "start", goalId: GOAL_ID, userGoal: GOAL }),
+			reply: goalCall("j7-goal-bot-start", { action: "start", goalId: GOAL_ID, userGoal: ASK }),
 		},
 		{
 			name: "j7-goal-bot-started",
 			check: (request) => {
-				seen.started = !goalResult(request).isError;
+				seen.startReceipt = goalResult(request);
 			},
 			reply: { content: [{ type: "text", text: STARTED }] },
 		},
@@ -150,6 +148,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		"J7 bot goal: the bot started its goal",
 		world.provider.whenReached(reached(TRACK.goalBot, "j7-goal-bot-started")),
 	);
+	expect(seen.startReceipt?.isError, seen.startReceipt?.text).toBe(false);
 	await withDeadline(trace, "J7 bot goal: the idle bot armed its continuation", world.timers.whenArmed(WAKE_OWNER));
 	await waitForBotRosterView(
 		world,
@@ -163,7 +162,6 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		{
 			sent: sent.mode,
 			holdsGoal: seen.holdsGoal,
-			started: seen.started,
 			goal: session.listPersistentBots().find((bot) => bot.agentId === GOAL_BOT)?.goal,
 			armed: world.timers.armedDelays(WAKE_OWNER),
 			early: world.timers.advance(WAKE_OWNER, DELAY_MS - 1),
@@ -173,7 +171,6 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	).toEqual({
 		sent: "started",
 		holdsGoal: true,
-		started: true,
 		goal: { satisfied: 0, total: 0, executing: true },
 		armed: [DELAY_MS],
 		early: 0,
@@ -216,7 +213,6 @@ async function startGoalBeforeClose(world: HarnessWorld, session: AgentSession):
 	createOwnerBot(session, CLOSED_BOT, MODEL_ID.goalBot, CLOSED_SOUL);
 	const seen: ClosedBotSeen = {
 		holdsGoal: false,
-		started: undefined,
 		carried: undefined,
 		refused: undefined,
 		completed: undefined,
@@ -231,12 +227,12 @@ async function startGoalBeforeClose(world: HarnessWorld, session: AgentSession):
 			check: (request) => {
 				seen.holdsGoal = offeredTools(request).includes("goal");
 			},
-			reply: goalCall("j7-closed-bot-start", { action: "start", goalId: CLOSED_GOAL_ID, userGoal: CLOSED_GOAL }),
+			reply: goalCall("j7-closed-bot-start", { action: "start", goalId: CLOSED_GOAL_ID, userGoal: CLOSED_ASK }),
 		},
 		{
 			name: "j7-closed-bot-started",
 			check: (request) => {
-				seen.started = !goalResult(request).isError;
+				seen.startReceipt = goalResult(request);
 			},
 			reply: { content: [{ type: "text", text: CLOSED_STARTED }] },
 		},
@@ -270,6 +266,7 @@ async function startGoalBeforeClose(world: HarnessWorld, session: AgentSession):
 		"J7 bot goal: the second bot started its goal",
 		world.provider.whenReached(reached(CLOSED_TRACK, "j7-closed-bot-started")),
 	);
+	expect(seen.startReceipt?.isError, seen.startReceipt?.text).toBe(false);
 	await withDeadline(
 		trace,
 		"J7 bot goal: the second bot's idle session armed its continuation",
@@ -286,11 +283,10 @@ async function startGoalBeforeClose(world: HarnessWorld, session: AgentSession):
 		{
 			sent: sent.mode,
 			holdsGoal: seen.holdsGoal,
-			started: seen.started,
 			armed: world.timers.armedDelays(WAKE_OWNER),
 		},
 		"the second bot starts its goal and its idle session holds one continuation wake at the owner's delay",
-	).toEqual({ sent: "started", holdsGoal: true, started: true, armed: [DELAY_MS] });
+	).toEqual({ sent: "started", holdsGoal: true, armed: [DELAY_MS] });
 	return seen;
 }
 

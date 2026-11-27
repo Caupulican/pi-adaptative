@@ -45,6 +45,8 @@ export interface LaneRecord {
 	reasonDetail?: string;
 	queuedAt?: string;
 	startedAt?: string;
+	/** Durable execution start, distinct from the lease timestamp on a worker lane. */
+	firstStartedAt?: string;
 	completedAt?: string;
 	costUsd?: number;
 	goalId?: string;
@@ -128,7 +130,7 @@ export function isLaneRecord(value: unknown): value is LaneRecord {
 	if (!isOptionalString(record.reasonCode)) return false;
 	if (!isOptionalString(record.reasonDetail)) return false;
 	if (!isOptionalString(record.queuedAt)) return false;
-	if (!isOptionalString(record.startedAt)) return false;
+	if (!isOptionalString(record.firstStartedAt) || !isOptionalString(record.startedAt)) return false;
 	if (!isOptionalString(record.completedAt)) return false;
 	if (record.costUsd !== undefined && (typeof record.costUsd !== "number" || !Number.isFinite(record.costUsd))) {
 		return false;

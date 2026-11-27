@@ -11,6 +11,7 @@ import { type OrchestrationHome, orchestrationEventStoreDir } from "../agent-pat
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { laneSubtreeId } from "../fleet/fleet-types.ts";
+import type { GoalSourcePosition } from "../goals/goal-correction-contract.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
 import { type AgentTurnBasis, agentTurnBasis, agentTurnDispatch } from "../orchestration/agent-turn-basis.ts";
@@ -154,6 +155,8 @@ export class WorkerLifecycle {
 		sessionId: string;
 		isProcessAlive?: (pid: number) => boolean;
 		now?: () => number;
+		assertGoalIdentity?: (goal: GoalState | string) => void;
+		goalSourcePosition?: (goal: GoalState) => GoalSourcePosition | undefined;
 		/**
 		 * Pre-built durable event store, forwarded to `DelegationOrchestrationLedger`. Defaults to
 		 * `undefined`, which the ledger resolves to its own real `OrchestrationEventStore` — a

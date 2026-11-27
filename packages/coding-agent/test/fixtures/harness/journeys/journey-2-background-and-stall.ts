@@ -593,7 +593,7 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 				{
 					id: "e9-req-1",
 					name: "goal",
-					arguments: { action: "add_requirement", text: "MAX_RETRIES equals 5" },
+					arguments: { action: "add_requirement", text: "Keep the limit at 5." },
 				},
 			]),
 			text("e9-goal-ready", "The goal is ready."),
@@ -622,7 +622,7 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			);
 		}
 		world.systemOne.enterPhase("e9-goal", {});
-		await withDeadline(trace, "E9 goal ready", e9Session.prompt("Set up the goal.", { autoContinueGoal: false }));
+		await withDeadline(trace, "E9 goal ready", e9Session.prompt("Keep the limit at 5.", { autoContinueGoal: false }));
 		const e9Before = e9Session.getGoalRuntimeSnapshot({ maxStallTurns: 20 });
 		expect(e9Before.continuation.openRequirementIds.length, "the setup leaves exactly one open requirement").toBe(1);
 		const e9Initial = e9Session.prompt("Work on the goal.", { autoContinueGoal: false });
@@ -677,7 +677,7 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 				{
 					id: "e9-req-1",
 					name: "goal",
-					arguments: { action: "add_requirement", text: "MAX_RETRIES equals 5" },
+					arguments: { action: "add_requirement", text: "Keep the limit at 5." },
 				},
 			]),
 			text("e9-goal-ready", "The goal is ready."),
@@ -696,7 +696,7 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			replan_required: { kind: "noul", probability: 0.02 },
 			next_status: { kind: "choice", choice: "continue", confidence: 0.97 },
 		});
-		await withDeadline(trace, "E9 goal ready", e9Session.prompt("Set up the goal.", { autoContinueGoal: false }));
+		await withDeadline(trace, "E9 goal ready", e9Session.prompt("Keep the limit at 5.", { autoContinueGoal: false }));
 		expect(
 			e9Session.getGoalRuntimeSnapshot({ maxStallTurns: 20 }).continuation.openRequirementIds.length,
 			"the setup leaves exactly one open requirement",
@@ -903,7 +903,7 @@ async function verifyGoalAutoContinueWake(world: HarnessWorld): Promise<void> {
 		},
 	);
 	const warningMark = world.warnings.length;
-	await withDeadline(trace, `${label} start turn`, session.prompt("Start the retry limit goal."), 90_000);
+	await withDeadline(trace, `${label} start turn`, session.prompt(GOAL), 90_000);
 	// The prompt's own tail arms the wake (its idle scheduling runs before prompt() resolves). A foreground-idle wait here
 	// would block on that armed continuation, which is foreground occupancy, until the port's wall timer fired it with no
 	// pass scripted: the witness waits for the arm itself.
@@ -1208,7 +1208,7 @@ async function verifyGoalWorkerDeadlineAndQuietHandoff(world: HarnessWorld): Pro
 				{
 					id: `${label}-goal-2`,
 					name: "goal",
-					arguments: { action: "add_requirement", requirementId: REQUIREMENT_ID, text: "MAX_RETRIES equals 5" },
+					arguments: { action: "add_requirement", requirementId: REQUIREMENT_ID, text: GOAL },
 				},
 			]),
 			check: (request) => assertBatchOk(request, `${label}: the goal start`),
@@ -1234,12 +1234,7 @@ async function verifyGoalWorkerDeadlineAndQuietHandoff(world: HarnessWorld): Pro
 		},
 	);
 	const warningMark = world.warnings.length;
-	await withDeadline(
-		trace,
-		`${label} dispatch turn`,
-		session.prompt("Set up the retry limit goal and dispatch its worker."),
-		90_000,
-	);
+	await withDeadline(trace, `${label} dispatch turn`, session.prompt(GOAL), 90_000);
 	await withDeadline(trace, `${label} worker held`, workerHeld.promise, 90_000);
 	// R29 control: the idle root waits on the bound worker, and its one goal-continuation alarm is that worker's deadline.
 	const waiting = session.getGoalRuntimeSnapshot({ maxStallTurns });

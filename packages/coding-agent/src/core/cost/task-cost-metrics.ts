@@ -8,7 +8,6 @@ import {
 	GOAL_STATE_CUSTOM_TYPE,
 	getLatestGoalStateSnapshot,
 } from "../goals/session-goal-state.ts";
-import { WORK_UNIT_CUSTOM_TYPE, type WorkUnitRecord } from "../work-units.ts";
 import type { AccountingOrigin } from "./accounting-evidence.ts";
 import { ChargedRanges } from "./charged-ranges.ts";
 import { chargedRangeOf } from "./session-usage.ts";
@@ -400,16 +399,6 @@ export function computeSessionTaskAndModelMetrics(options: {
 				currentWindow.goalWindowClosed = true;
 			}
 			continue;
-		}
-		if (entry.type === "custom" && entry.customType === WORK_UNIT_CUSTOM_TYPE) {
-			const data = entry.data as WorkUnitRecord | undefined;
-			if (data?.kind === "declared" && typeof data.goalId === "string") {
-				const openedAt =
-					typeof data.openedAt === "number" && Number.isFinite(data.openedAt) ? data.openedAt : entryMs;
-				openGoalWindow(data.goalId, data.reason ?? data.goalId, openedAt);
-				if (currentWindow) entryOwners.set(entry.id, currentWindow);
-				continue;
-			}
 		}
 
 		if (entry.type === "message" && entry.message.role === "user") {

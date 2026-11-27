@@ -163,13 +163,16 @@ import { ForegroundTerminalHandoffController } from "./foreground-terminal-hando
 import type { ChannelProvider, JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import { reportGithubOriginPinForSession } from "./github-origin-pin.ts";
 import { isOwnIdleContinuationAdmission } from "./goals/goal-auto-continue-controller.ts";
-import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
+import { sessionClarificationWriter } from "./goals/goal-clarification-log.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { goalRuntimeFactsOf } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
-import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
+import { type GoalEvidenceRef, type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
+import { currentGoalOwner, currentGoalWorkSource, greetingWorkRefusal } from "./goals/goal-work-admission.ts";
+import { goalSourcePosition, recordGoalOwnerCorrection } from "./goals/session-goal-correction.ts";
+import { ownerSpecifiedRequirementCheck } from "./goals/session-goal-evidence.ts";
 import { HarnessNoticeController, harnessNoticeDestination } from "./harness-notice.ts";
 import { HostTurnReasoningController } from "./host-turn-reasoning.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
@@ -325,7 +328,7 @@ import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plan
 import type { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import { formatClarificationQuestion } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
-import { appendOwnerFollowUp, ownerFollowUpPath } from "./system-one/owner-question-routing.ts";
+import { sessionOwnerFollowUpWriter } from "./system-one/owner-question-routing.ts";
 import { changesPlan, reviewPlan } from "./system-one/plan-review.ts";
 import type { SemanticUncertaintyPort } from "./system-one/semantic-doubts.ts";
 import type { SemanticEvaluationRecord } from "./system-one/semantic-evaluation-ledger.ts";
@@ -559,7 +562,11 @@ export class AgentSession {
 	/** The proof this session records on its goal from its workers: accepted claim evidence and the host's own checks. */
 	private readonly goalProof = createGoalProofWrites({
 		requirementCheckSession: () => this._runtimeBuilder,
+		coverageEngine: () => this._semanticDecisionEngine(),
+		isCheckCoverageEstablished: (requirement) =>
+			ownerSpecifiedRequirementCheck(this.sessionManager, this._goals.getState(), requirement),
 		getGoalState: () => this._goals.getState(),
+		getSessionManager: () => this.sessionManager,
 		saveGoalState: (state, expected) => this._goals.saveState(state, expected),
 		getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
 		getWorkerClaimSnapshots: () => this.getWorkerClaimSnapshots(),
@@ -790,8 +797,10 @@ export class AgentSession {
 			resetSanitizerPrefixHorizon: () => this.agent.resetSanitizerPrefixHorizon(),
 			previewWorkerModel: () => this._backgroundLanes.previewWorkerModel(),
 			getGoalState: () => this._goals.getState(),
-			executeObjectiveRootRoute: (route, signal) => this._goals.objectiveRootExecutor().execute(route, signal),
-			runWorkerDelegationOnce: (request) => this.runWorkerDelegationOnce(request),
+			getObjective: (id) => this._backgroundLanes.getTaskRuntimeSnapshot()?.objectives[id]?.objective,
+			executeObjectiveRootRoute: (route, signal, submitted) =>
+				this._goals.objectiveRootExecutor().execute(route, signal, submitted),
+			runWorkerDelegationOnce: (request, started) => this._backgroundLanes.runWorkerDelegationOnce(request, started),
 			sendNextTurnCustomMessage: (message, assertCurrent) =>
 				this._messageDelivery.deliverCustomMessageWithLease(
 					message,
@@ -999,6 +1008,7 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._agentDir = agentDir;
+		const recordOwnerFollowUp = sessionOwnerFollowUpWriter(this._agentDir, () => this.sessionId);
 		this._runtimeAdmission = new SessionRuntimeAdmissionController(
 			runtimeGenerationAdmission(agentDir),
 			(event) => this._emit(event),
@@ -1156,32 +1166,23 @@ export class AgentSession {
 			getArtifactStore: () => this._getToolArtifactStore(),
 			getImageStore: () => this._getSessionImageStore(),
 			runAgentPrompt: (messages, signal) => this._foregroundRecovery.runAgentPrompt(messages, undefined, signal),
-			recordObjectiveClarification: (objectiveId, event) => {
-				recordObjectiveClarification(
-					{
-						getGoalState: () => this.getGoalStateSnapshot(),
-						saveGoalState: (state, expected) => {
-							this.saveGoalStateSnapshot(state, expected);
-						},
-					},
-					objectiveId,
-					event,
-				);
-			},
+			recordObjectiveClarification: sessionClarificationWriter(this),
 			recordOwnerFollowUp: (request, reason) =>
-				appendOwnerFollowUp(ownerFollowUpPath(this._agentDir, this.sessionManager.getSessionId()), {
+				recordOwnerFollowUp({
 					question: formatClarificationQuestion(request.questions),
 					reason,
 					request: this._promptSubmission?.lastUserRequest ?? "",
-					at: new Date().toISOString(),
 				}),
 		});
 		this._goals = new GoalSessionController({
+			currentWorkerEvidenceIds: this.goalProof.currentWorkerEvidenceIds,
 			getSessionManager: () => this.sessionManager,
 			timers: config.timers,
 			getModel: () => this.model,
+			completionSources: () => this._runtimeBuilder.goalCompletionSources(),
 			runtimeFacts: () => goalRuntimeFactsOf(this._backgroundLanes, this._backgroundToolTasks.list()),
 			getOwnerEvidence: () => this._reflection.ownerEvidence,
+			hasDurableGoalObjective: (id) => this._backgroundLanes.hasDurableGoalObjective(id),
 			synchronizeGoalState: (state) => {
 				this._unsettledLadder.noteGoalState(state); // owner items a paused goal held post on resume; never throws
 				this._backgroundLanes.synchronizeGoalState(state);
@@ -1708,7 +1709,7 @@ export class AgentSession {
 			context: providerRequestContext,
 			parentInputs: this.sessionManager,
 			getSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
-			admitGoalRequest: () => this._goals.admitProviderRequest(),
+			admitGoalRequest: (...args) => this._goals.admitProviderRequest(...args),
 			ordinaryWork: this.ordinaryWork,
 			maxOutputTokens: () =>
 				Math.min(this.settingsManager.getMaxOutputTokens(), this.getCapabilityTierPolicy().maxOutputTokens),
@@ -1840,6 +1841,7 @@ export class AgentSession {
 				getSessionManager: () => this.sessionManager,
 				getAgent: () => this.agent,
 				prepareHistory: () => this._foregroundLifecycle.repair(),
+				commitRoutedMessages: () => this._foregroundLifecycle.commitRoutedMessages(),
 				holdLateWork: (work) => this._runtimeAdmission.holdBundleUntil(work),
 				onAccepted: (message) => {
 					this._emit({ type: "message_start", message });
@@ -2144,7 +2146,8 @@ export class AgentSession {
 			restoreMemoryReloadSnapshot: (snapshot) => this._memory.restoreReloadSnapshot(snapshot),
 			initializeMemory: () => this._memory.initialize(),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
-			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
+			saveGoalStateSnapshot: (...args) => this._goals.saveState(...args),
+			prepareCompletionPresentation: (...args) => this._goals.prepareCompletionPresentation(...args),
 			getGoalAutoContinueNote: () => this._goals.autoContinueNote(),
 			goalClock: config.timers.port("goal-continuation"),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
@@ -2158,17 +2161,15 @@ export class AgentSession {
 				isHandoff: () => this._edgeIntent.handoff,
 				getRequestText: () => this._promptSubmission?.lastUserRequest ?? "",
 				consultStrongerModel: (input) => this._unsettledLadder.consultStrongerModel(input),
-				recordOwnerFollowUp: (entry) => {
-					const path = appendOwnerFollowUp(ownerFollowUpPath(this._agentDir, this.sessionManager.getSessionId()), {
-						...entry,
-						at: new Date().toISOString(),
-					});
-					return path;
-				},
+				recordOwnerFollowUp,
 			}),
 			getAdaptiveReadiness: () => this._adaptiveReadiness,
 			grantEdgeFromInstructions: (grant) => this.grantEdge(grant.class, "instructions", grant),
 			enforceEdgeOperation: (op, signal) => enforceSessionEdgeOperation(this._edgeDeps(), op, undefined, signal),
+			goalExecutionSignal: (id, activeOnly) =>
+				this._goals.executionCustody.signalFor(id, this._goals.getState(), activeOnly),
+			getGoalWorkSource: () =>
+				currentGoalWorkSource(this._reflection.ownerEvidence, this.sessionManager.getBranch()),
 			authorizeGoalStartFromTool: (input) => this._goals.authorizeStartFromTool(input),
 			getTaskStepsStateSnapshot: () => this.getTaskStepsStateSnapshot(),
 			saveTaskStepsStateSnapshot: (state) => this.saveTaskStepsStateSnapshot(state),
@@ -2323,6 +2324,7 @@ export class AgentSession {
 			onBranchChanged: () => {
 				void this._humanInput.invalidate("session branch changed");
 				this._branchGeneration++;
+				this._goals.executionCustody.changed();
 				this._backgroundLanes.signalWorkerReceiptDelivery();
 				// Owner input accepted on the old branch is held in full, never delivered on the new one.
 				this._pendingQueue.reconcileContext();
@@ -2403,6 +2405,7 @@ export class AgentSession {
 				evaluateToolGate({ toolName, cwd: this._cwd, envelope: this.capabilityEnvelope }).outcome === "allow",
 		});
 		this._toolGate = new ToolGateController({
+			currentRequestWorkRefusal: () => greetingWorkRefusal(currentGoalOwner(this._reflection.ownerEvidence)),
 			settleOwnerPolicy: (signal) => this._edgeIntent.ownerPolicy.settle("latest", signal),
 			getExecutionMode: () => this.settingsManager.getEdgeSettings().mode,
 			gateSelfCompaction: (toolName, assistantMessage) =>
@@ -2588,9 +2591,8 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent, { publishesMessageEdits: true });
 		this._installAgentToolHooks();
 		this._providerRequestRuntime.install();
-		this._providerRequestRuntime.installTurnRefresh(
-			() => this._terminalHandoffs.flushProviderBoundary(),
-			() => this._durableCustomMessageTurns.flushParentSteers(),
+		this._providerRequestRuntime.installTurnRefresh(this._durableCustomMessageTurns, () =>
+			this._terminalHandoffs.flushProviderBoundary(),
 		);
 		this._providerRequestRuntime.isolateHistoryWhen(
 			() => !this._hasMutableEventListeners && this._extensionRunner.activeExtensions.length === 0,
@@ -2880,7 +2882,8 @@ export class AgentSession {
 				backgroundLanes: this._backgroundLanes,
 				goals: this._goals,
 				chooseObjectiveExecutor: (route) => this._chooseObjectiveExecutor(route),
-				retrieveForObjective: (route, signal) => this._retrieveForObjective(route, signal),
+				retrieveForObjective: (route, signal, submitted) =>
+					this._cache.retrieveForObjective(route, signal, submitted),
 				waitForObjectiveWorkers: (context, signal) => this._workState.waitForObjectiveWorkers(context, signal),
 				workerSupervision: this._workerSupervision,
 				objectiveMutationId: () => this.objectiveMutationId(),
@@ -3543,6 +3546,7 @@ export class AgentSession {
 		void this._disposeCompletion.catch(() => undefined);
 		safely(() => this.ordinaryWork.dispose());
 		this._disposed = true;
+		this._goals.executionCustody.changed();
 		this._ownerReturnBrief.dispose();
 		trackRequired(() => this._analytics.dispose());
 		const humanInputPreparation = this._humanInput.invalidate("session dispose");
@@ -3952,16 +3956,6 @@ export class AgentSession {
 			turnMessages,
 			signal,
 		);
-	}
-
-	/**
-	 * The objective loop's retrieve route: the talker reads on its warm prefix, or minions (read-only
-	 * workers, no forked turns) each gather one question on a small brief (`priceExecutor` decides, as
-	 * for any route the root may take). Only accepted reports reach the talker, as one bounded evidence
-	 * record on its next turn.
-	 */
-	private async _retrieveForObjective(route: ObjectiveRoute, signal?: AbortSignal): Promise<"root" | "worker"> {
-		return this._cache.retrieveForObjective(route, signal);
 	}
 
 	private async _ensureRouteModelReady(
@@ -4728,20 +4722,22 @@ export class AgentSession {
 		return this._analytics.getDailyUsageBreakdown(formatLabel, now);
 	}
 
-	/** Save a snapshot of the goal state to the session log. */
+	readonly goalSourcePosition = (goal: GoalState) => goalSourcePosition(this.sessionManager, goal);
+	readonly recordGoalOwnerCorrection = (goal: GoalState, objective: string, now: string, entryId?: string) =>
+		recordGoalOwnerCorrection(this.sessionManager, goal, objective, now, entryId);
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string {
 		return this._goals.saveState(state, expected);
 	}
-
 	/** Persist a branch-scoped tombstone and stop goal-owned execution without resurrecting old state. */
 	clearGoalStateSnapshot(state: GoalState, now: string): string {
 		return this._goals.clearState(state, now);
 	}
 
-	/** Retrieve the latest valid goal state snapshot from the session log. */
 	getGoalStateSnapshot(): GoalState | undefined {
 		return this._goals.getState();
 	}
+
+	readonly observeGoalEvidence = (evidence: GoalEvidenceRef) => this._runtimeBuilder.observeGoalEvidence(evidence);
 
 	/** Persist one submitted continuation pass's turn and active-wall-clock telemetry. */
 	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number }): void {
@@ -4759,7 +4755,10 @@ export class AgentSession {
 	restoreGoalRuntimeAfterResume(): { readonly resumed: boolean; readonly usageWait?: RestoredUsageWait } {
 		const usageWait = this._usageReset.restoreWait(this.getGoalStateSnapshot());
 		// A goal waiting for its usage reset resumes at the reset, never now against the limit that stopped it.
-		return { resumed: !usageWait?.goal && this._goals.restoreAfterResume(), ...(usageWait ? { usageWait } : {}) };
+		return {
+			resumed: !usageWait?.goal && this._goals.restoreAfterResume(this.settingsManager.getAutonomySettings()),
+			...(usageWait ? { usageWait } : {}),
+		};
 	}
 
 	/** Save native task-step state to the active session log. */
@@ -4879,11 +4878,7 @@ export class AgentSession {
 		return entryId;
 	}
 
-	/**
-	 * Makes accepted worker proof citable by the goal's completion account. It runs after every claim save and
-	 * every review acknowledgement (a claim flagged for review only becomes covered once acknowledged). It never
-	 * satisfies a requirement, and a failure here must not report a saved claim as unsaved.
-	 */
+	/** Mirrors accepted worker receipts after a claim save or review acknowledgement. */
 	recordAcceptedWorkerEvidence(): void {
 		this.goalProof.recordAcceptedWorkerEvidence();
 	}
@@ -4964,8 +4959,11 @@ export class AgentSession {
 	}
 
 	/** Run one durable worker-agent turn. */
-	async runWorkerDelegationOnce(request: WorkerDelegationRequest): Promise<WorkerDelegationRunOutcome> {
-		return this._backgroundLanes.runWorkerDelegationOnce(request);
+	async runWorkerDelegationOnce(
+		request: WorkerDelegationRequest,
+		onStarted?: (record: LaneRecord) => void,
+	): Promise<WorkerDelegationRunOutcome> {
+		return this._backgroundLanes.runWorkerDelegationOnce(request, onStarted);
 	}
 
 	/** Probe a candidate model against the subagent contracts. */

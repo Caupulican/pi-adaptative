@@ -8,6 +8,7 @@ import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
 
 const ROOT_AGENT = "root-agent";
+const sessionId = "tree-admission-session";
 const now = "2026-11-12T00:00:00.000Z";
 
 function executionContract(maxAttempts: number) {
@@ -51,7 +52,6 @@ function executionContract(maxAttempts: number) {
 
 function lifecycleFor(maxAttempts: number): { lifecycle: WorkerLifecycle; directory: string } {
 	const directory = mkdtempSync(path.join(tmpdir(), "pi-worker-tree-admission-"));
-	const sessionId = "tree-admission-session";
 	const lifecycle = new WorkerLifecycle({
 		orchestrationHome: ownerOrchestrationHome(directory),
 		sessionId,
@@ -186,6 +186,59 @@ const startInternal = Reflect.get(WorkerDelegationController.prototype, "startIn
 ) => unknown;
 
 describe("worker tree attempt admission at materialization", () => {
+	it("recovers the originating route of a reused specialist and keeps its next assignment independent", () => {
+		const { lifecycle, directory } = lifecycleFor(2);
+		try {
+			failCurrentTask(lifecycle, ROOT_AGENT);
+			const { objectiveId } = lifecycle.ledger.runtime.createObjective({
+				objectiveId: "inventory",
+				title: "Inventory",
+				description: "Find the release manifest.",
+			});
+			const origin = { sessionId, objectiveId, cycleId: "cycle_1_12ab34cd", executor: "worker" as const };
+			const assignment = {
+				agentId: ROOT_AGENT,
+				instructions: "Locate the manifest.",
+				controlMessageId: "locate-manifest",
+				objectiveRouteOrigin: origin,
+				taskContext: {},
+			};
+			const { attempt } = lifecycle.prepareAgentTurn(assignment);
+			expect(lifecycle.getTask(attempt.taskId)?.task.objectiveId).toBe(objectiveId);
+			expect(attempt.dispatch.objectiveRouteOrigin).toEqual(origin);
+			expect(attempt.firstStartedAt).toBeUndefined();
+
+			const reopened = new WorkerLifecycle({
+				orchestrationHome: ownerOrchestrationHome(directory),
+				sessionId,
+				now: () => Date.parse(now),
+			});
+			expect(reopened.prepareAgentTurn(assignment).created).toBe(false);
+			expect(() =>
+				reopened.prepareAgentTurn({
+					...assignment,
+					objectiveRouteOrigin: { ...origin, cycleId: "cycle_2_12ab34cd" },
+				}),
+			).toThrow();
+			startTask(reopened, attempt.taskId);
+			failCurrentTask(reopened, attempt.taskId);
+			const finished = reopened.getTaskRuntimeSnapshot().attempts[attempt.attemptId]!;
+			expect(finished.dispatch.objectiveRouteOrigin).toEqual(origin);
+			expect(finished.firstStartedAt).toBe(now);
+
+			const next = reopened.prepareAgentTurn({
+				agentId: ROOT_AGENT,
+				instructions: "Read the release notes.",
+				controlMessageId: "read-release-notes",
+				taskContext: {},
+			}).attempt;
+			expect(next.dispatch.objectiveRouteOrigin).toBeUndefined();
+			expect(reopened.getTask(next.taskId)?.task.objectiveId).toBe(`session:${sessionId}`);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it.each([
 		{ sourceAttempts: 2, otherAttempts: 1, denied: true },
 		{ sourceAttempts: 1, otherAttempts: 2, denied: false },

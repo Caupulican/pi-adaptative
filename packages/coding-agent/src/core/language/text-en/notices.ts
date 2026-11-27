@@ -291,11 +291,11 @@ export const NOTICES = {
 	 */
 	heldDraft: (classes: string, origin: string, grants: string) => ({
 		head: "Held, not run: ",
-		tail: ` (${classes}), asked by ${origin}. It runs if you ask for it yourself${grants === "" ? "" : `; ${grants} lets such runs do it`}.`,
+		tail: ` (${classes}), asked by ${origin}. Ask for the action explicitly to issue a new call${grants === "" ? "" : `; ${grants} permits future calls`}.`,
 	}),
 	/** No more held actions are recorded: `max` of them already wait for the owner. */
 	heldDraftsFull: (origin: string, max: number) =>
-		`Held, not run: actions asked by ${origin}; ${max} held actions already wait for you, so no more are recorded. They run if you ask for them yourself.`,
+		`Held, not run: actions asked by ${origin}; ${max} held actions already wait for you, so no more are recorded. Ask for the action explicitly to issue a new call.`,
 
 	/**
 	 * Why a subscription's usage reading decides what it does (`SubscriptionAllowance`'s cause, `allowanceCauseText`): a

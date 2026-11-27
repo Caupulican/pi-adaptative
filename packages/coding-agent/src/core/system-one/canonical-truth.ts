@@ -3,11 +3,19 @@
  * ExecutionStore is not a second authority: hydrate it from this before every System One stage.
  */
 
-import { isDeepStrictEqual } from "node:util";
 import type { VerificationObligationView } from "../../kernel/verification-obligations.ts";
-import type { GoalState } from "../goals/goal-state.ts";
+import { currentRequirementCheckEvidence, getTrustedRequirementEvidence } from "../goals/goal-acceptance.ts";
+import { type GoalEvidenceRef, type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
+import { goalEvidenceObservation } from "../goals/requirement-coverage.ts";
+import {
+	currentGoalRequirements,
+	hasCurrentCheckProvenance,
+	hasCurrentWorkerGeneration,
+} from "../goals/requirement-proof.ts";
+import { objectiveTakesNewWork } from "../orchestration/contracts.ts";
+import { isGoalEvidenceMirror } from "../orchestration/goal-evidence-mirror.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
-import { goalObjectiveId, projectGoalAcceptanceEvidence } from "../orchestration/work-state-projection.ts";
+import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { CanonicalHydration } from "./execution-state.ts";
 import type {
 	AcceptanceCriterion,
@@ -28,6 +36,7 @@ export interface CanonicalTruthInput {
 	lastRoute?: { route: string; objective_id?: string };
 	currentRevision: string;
 	repository?: CanonicalHydration["repository"];
+	observeGoalEvidence?(evidence: GoalEvidenceRef): string | undefined;
 }
 
 const EMPTY_HYDRATION: Omit<CanonicalHydration, "current_revision"> = {
@@ -73,7 +82,8 @@ function actionClassForRoute(route: string): PlanActionClass {
 
 function sourceKindForEvidence(kind: string): SourceKind {
 	if (kind === "test" || kind === "command" || kind === "check") return "test";
-	if (kind === "review") return "log";
+	if (kind === "review" || kind === "worker" || kind === "tool") return "log";
+	if (kind === "file") return "file";
 	if (kind === "external") return "external_doc";
 	return "user";
 }
@@ -96,16 +106,20 @@ export function projectCanonicalTruth(input: CanonicalTruthInput): CanonicalHydr
 	}
 
 	const request = goal?.userGoal ?? runtimeObjective?.objective.title ?? "";
-	const normalized_goal = runtimeObjective?.objective.description ?? goal?.userGoal ?? "";
+	const normalized_goal = goal?.userGoal ?? runtimeObjective?.objective.description ?? "";
 
 	let acceptance_criteria: AcceptanceCriterion[];
-	if (goal && goal.requirements.length > 0) {
+	if (goal) {
 		acceptance_criteria = goal.requirements.map((requirement) => ({
 			id: requirement.id,
 			text: requirement.text,
 			required: true,
-			status: criterionStatus(requirement.status),
-			evidence_ids: [...requirement.evidenceIds],
+			status: criterionStatus(
+				requirement.status === "satisfied" && getTrustedRequirementEvidence(goal, requirement).length === 0
+					? "open"
+					: requirement.status,
+			),
+			evidence_ids: getTrustedRequirementEvidence(goal, requirement).map((item) => item.id),
 			waiver_id: null,
 		}));
 	} else {
@@ -130,10 +144,28 @@ export function projectCanonicalTruth(input: CanonicalTruthInput): CanonicalHydr
 	const now = new Date().toISOString();
 	const observations: Observation[] = [];
 	if (goal) {
+		const accepted = new Set(
+			goal.requirements.flatMap((requirement) =>
+				getTrustedRequirementEvidence(goal, requirement).map((item) => item.id),
+			),
+		);
+		const currentChecks = new Set(
+			goal.requirements.map((requirement) => currentRequirementCheckEvidence(goal, requirement)?.id),
+		);
 		for (const evidence of goal.evidence) {
+			let observed: string | undefined;
+			if (
+				evidence.verified &&
+				hasCurrentWorkerGeneration(goal, evidence) &&
+				hasCurrentCheckProvenance(goal, evidence) &&
+				(evidence.kind !== "check" || currentChecks.has(evidence.id))
+			)
+				observed = input.observeGoalEvidence?.(evidence) ?? goalEvidenceObservation(evidence, undefined);
+			if (evidence.kind === "worker" && hasCurrentWorkerGeneration(goal, evidence) && accepted.has(evidence.id))
+				observed = evidence.summary;
 			observations.push({
 				id: `OBS-${evidence.id}`,
-				text: evidence.summary,
+				text: observed ?? evidence.summary,
 				source: {
 					kind: sourceKindForEvidence(evidence.kind),
 					locator: evidence.uri ?? evidence.id,
@@ -141,21 +173,17 @@ export function projectCanonicalTruth(input: CanonicalTruthInput): CanonicalHydr
 					revision,
 					line_start: null,
 					line_end: null,
-					trust: evidence.verified ? "authoritative" : "repository_untrusted_text",
+					trust: observed ? "authoritative" : "repository_untrusted_text",
 				},
-				freshness: evidence.verified === false ? "stale" : "fresh",
+				freshness: observed ? "fresh" : "stale",
 				status: "observed",
 			});
 		}
 	}
-	const goalEvidenceById = new Map(
-		goal ? projectGoalAcceptanceEvidence(goal).map((evidence) => [evidence.evidenceId, evidence]) : [],
-	);
 	for (const item of runtimeObjective?.evidence ?? []) {
-		const goalEvidence = goalEvidenceById.get(item.evidenceId);
 		if (
 			observations.some((observation) => observation.id === `OBS-${item.evidenceId}`) ||
-			(goalEvidence !== undefined && isDeepStrictEqual(item, goalEvidence))
+			(goal && isGoalEvidenceMirror(item, goal.goalId))
 		)
 			continue;
 		observations.push({
@@ -185,26 +213,31 @@ export function projectCanonicalTruth(input: CanonicalTruthInput): CanonicalHydr
 		covers_acceptance_ids: [],
 		observation_ids: [],
 	}));
-	// A requirement's check is the harness's own proof: its latest rerun, passed or failed, covers it.
+	// Measurements retain their outcome. Acceptance coverage is projected only from the proof owner.
 	for (const requirement of goal?.requirements ?? []) {
 		if (!requirement.check) continue;
-		const latest = goal?.evidence.findLast(
-			(evidence) => evidence.kind === "check" && evidence.uri === requirement.id,
-		);
+		const latest = goal && currentRequirementCheckEvidence(goal, requirement);
+		const current = latest && hasCurrentWorkerGeneration(goal!, latest) ? latest : undefined;
 		verification.push({
 			id: `VR-check-${requirement.id}`,
 			kind: verificationKindForCommand(requirement.check.command),
-			status: latest ? (latest.outcome === "succeeded" ? "passed" : "failed") : "failed",
-			timestamp: latest?.createdAt ?? now,
+			status: current ? (current.outcome === "succeeded" ? "passed" : "failed") : "unavailable",
+			timestamp: current?.createdAt ?? now,
 			command: requirement.check.command,
 			artifact_ref: null,
-			covers_acceptance_ids: [requirement.id],
-			observation_ids: latest ? [`OBS-${latest.id}`] : [],
+			covers_acceptance_ids:
+				goal && getTrustedRequirementEvidence(goal, requirement).some((item) => item.id === current?.id)
+					? [requirement.id]
+					: [],
+			observation_ids: current ? [`OBS-${current.id}`] : [],
 		});
 	}
 
 	const plan_steps: PlanStep[] = [];
-	if (input.lastRoute?.route) {
+	if (
+		input.lastRoute?.route &&
+		(input.lastRoute.objective_id === undefined || input.lastRoute.objective_id === objectiveId)
+	) {
 		plan_steps.push({
 			id: input.lastRoute.route,
 			goal: input.lastRoute.route,
@@ -214,7 +247,7 @@ export function projectCanonicalTruth(input: CanonicalTruthInput): CanonicalHydr
 			proof_obligations: [],
 		});
 	} else {
-		const open = goal?.requirements.find((requirement) => requirement.status === "open");
+		const open = goal && currentGoalRequirements(goal).find((requirement) => requirement.status === "open");
 		if (open) {
 			plan_steps.push({
 				id: open.id,
@@ -229,6 +262,14 @@ export function projectCanonicalTruth(input: CanonicalTruthInput): CanonicalHydr
 
 	return {
 		request,
+		...(goal &&
+		isGoalExecutionActive(goal.status) &&
+		objectiveTakesNewWork(runtimeObjective?.objective) &&
+		runtimeObjective?.goalSource?.createdAt === goal.createdAt &&
+		runtimeObjective.goalSource.lastCorrection &&
+		goal.ownerCorrection?.ownerEntryId === runtimeObjective.goalSource.lastCorrection.ownerEntryId
+			? { ownerCorrectionEntryId: runtimeObjective.goalSource.lastCorrection.ownerEntryId }
+			: {}),
 		normalized_goal,
 		acceptance_criteria,
 		constraints,

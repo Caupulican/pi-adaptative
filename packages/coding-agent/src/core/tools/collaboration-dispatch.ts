@@ -82,21 +82,30 @@ interface CollaborationGuardResultDetails {
 export async function dispatchCollaborationWorker(
 	deps: CollaborationDispatchDeps,
 	args: { requirementId: string; instructions: string },
+	signal?: AbortSignal,
 ): Promise<{ laneId?: string; skipReason?: string }> {
 	// Capability check FIRST -- before the tool-definition lookup and before createLaneWorktree --
 	// so an ineligible model's dispatch is refused with zero lane/pane/tool side effect. The coarse
 	// "worker_capability_insufficient" skip-reason code carries the granular refusal
 	// (reason/class/window) so the caller can surface exactly why.
 	const refusal = await deps.evaluateWorkerLaneRefusal?.();
+	signal?.throwIfAborted();
 	if (refusal !== undefined) return { skipReason: laneWorkerRefusalSkipReason(refusal) };
 	const toolDef = deps.getToolDefinition("pi_collaboration");
 	if (!toolDef) return { skipReason: "collaboration_extension_not_loaded" };
 
 	const goalId = deps.getGoalId();
 	const ctx = deps.createExtensionContext();
+	const dispatchSignal = ctx.signal && signal ? AbortSignal.any([ctx.signal, signal]) : (signal ?? ctx.signal);
 	const toolCallId = `goal-dispatch:${goalId ?? "?"}:${args.requirementId}`;
 	try {
-		const guardResult = await toolDef.execute(`${toolCallId}:guard`, { action: "guard" }, ctx.signal, undefined, ctx);
+		const guardResult = await toolDef.execute(
+			`${toolCallId}:guard`,
+			{ action: "guard" },
+			dispatchSignal,
+			undefined,
+			ctx,
+		);
 		const guard = (guardResult.details as CollaborationGuardResultDetails | undefined)?.guard;
 		if (guardResult.isError || guard?.allowed !== true) return { skipReason: "collaboration_unavailable" };
 	} catch {
@@ -111,6 +120,7 @@ export async function dispatchCollaborationWorker(
 	// stable `worktree_create_failed` skip reason -- same narrow `{laneId?, skipReason?}` contract
 	// every other skip path here already uses; the engine's own detail lives in its audit log, not in
 	// this narrow return.
+	dispatchSignal?.throwIfAborted();
 	let laneWorktree: { laneKey: string; worktreePath: string } | undefined;
 	if (deps.createLaneWorktree) {
 		const created = await deps.createLaneWorktree({ goalId, requirementId: args.requirementId });
@@ -155,7 +165,8 @@ export async function dispatchCollaborationWorker(
 	};
 	let result: Awaited<ReturnType<ToolDefinition["execute"]>>;
 	try {
-		result = await toolDef.execute(toolCallId, params, ctx.signal, undefined, ctx);
+		dispatchSignal?.throwIfAborted();
+		result = await toolDef.execute(toolCallId, params, dispatchSignal, undefined, ctx);
 	} catch {
 		return failAfterLane("collaboration_dispatch_failed");
 	}

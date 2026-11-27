@@ -3,10 +3,37 @@ import type { Message } from "@caupulican/pi-ai/types";
 import type { CustomMessage } from "../messages.ts";
 import { isPlainRecord } from "../utils/value-guards.ts";
 import type { SessionAppendReceipt } from "./session-append-receipt.ts";
-import type { SessionEntry } from "./session-entries.ts";
+import type { CustomEntry, SessionEntry } from "./session-entries.ts";
 
 export interface ParentInputAppendReceipt extends SessionAppendReceipt {
 	readonly created: boolean;
+}
+
+export type ParentInputAppendGuard = (append: () => ParentInputAppendReceipt) => ParentInputAppendReceipt;
+
+export function appendWithParentInputGuard(
+	append: () => SessionAppendReceipt,
+	guard?: ParentInputAppendGuard,
+): ParentInputAppendReceipt {
+	let receipt: ParentInputAppendReceipt | undefined;
+	let open = true;
+	const admit = () => {
+		if (!open) throw new Error("Parent input append admission has ended.");
+		open = false;
+		receipt = { ...append(), created: true };
+		return receipt;
+	};
+	try {
+		if (guard) guard(admit);
+		else admit();
+		if (!receipt) throw new Error("Parent input producer did not admit the append.");
+		return receipt;
+	} catch (error) {
+		if (receipt) return receipt;
+		throw error;
+	} finally {
+		open = false;
+	}
 }
 
 export const PARENT_INPUT_SETTLED_CUSTOM_TYPE = "parent_input_wake_settled";
@@ -14,6 +41,36 @@ export const MAX_PENDING_PARENT_INPUTS = 256;
 export const MAX_PARENT_WAKE_CHARS = 64 * 1024;
 export const PARENT_NOTE_REQUEST_CUSTOM_TYPE = "parent_note_request";
 export const PARENT_INPUT_CONSUMED_CUSTOM_TYPE = "parent_input_consumed";
+
+/** Publish the terminal settlement and its consumption receipt in one ordered batch. */
+export function parentWakeSettlementEntries(
+	wakeId: string,
+	completed: NonNullable<ParentInputWake["completed"]>,
+	consumption: ParentInputConsumption,
+	parentId: string | null,
+	settlementId: string,
+	receiptId: string,
+	timestamp: string,
+): [CustomEntry, CustomEntry] {
+	return [
+		{
+			type: "custom",
+			id: settlementId,
+			parentId,
+			timestamp,
+			customType: PARENT_INPUT_SETTLED_CUSTOM_TYPE,
+			data: { version: 1, wakeId, ...completed },
+		},
+		{
+			type: "custom",
+			id: receiptId,
+			parentId: settlementId,
+			timestamp,
+			customType: PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
+			data: consumption,
+		},
+	];
+}
 export type ParentInputMode = "turn" | "next-owner-turn";
 const parentInputCache = new WeakMap<SessionEntry, PersistedParentInput | undefined>();
 const parentMessageCache = new WeakMap<CustomMessage<unknown>, ParentInputMetadata | undefined>();
@@ -467,11 +524,60 @@ export interface ParentInputWake {
 	readonly inputs: readonly ParentWakeInput[];
 	/** Exact accepted text, including for a wake recovered from an older transcript. */
 	readonly content: string;
+	/** Active request window reconstructed from the branch. */
+	readonly window?: ParentWakeRequestWindow;
 	readonly completed?: {
 		readonly requestId: string;
 		readonly assistantMessageEntryId: string;
 		readonly terminalEntryId: string;
 	};
+}
+
+export interface ParentWakeRequestWindow {
+	admitsPriorEntry(entryId: string): boolean;
+	readonly hasExcludedHistory: boolean;
+}
+
+/** Retain the accepted manifest and previous exchanges bound to it, leaving earlier history available for recall. */
+export function parentWakeRequestWindow(
+	branch: readonly SessionEntry[],
+	wake: ParentInputWake,
+): ParentWakeRequestWindow {
+	const accepted = new Set<string>([wake.entryId, ...wake.inputs.map((input) => input.entryId)]);
+	const start = branch.findIndex((entry) => entry.id === wake.inputs[0]?.entryId);
+	if (start < 0) throw new Error("Parent wake request window has no canonical opening.");
+	const priorHistory = new Set<string>();
+	const bound = new Set<string>();
+	for (let index = start; index < branch.length; index++) {
+		const entry = branch[index]!;
+		if (
+			(entry.type === "message" && !(entry.message.role === "bashExecution" && entry.message.excludeFromContext)) ||
+			entry.type === "custom_message" ||
+			entry.type === "compaction" ||
+			(entry.type === "branch_summary" && entry.summary)
+		)
+			priorHistory.add(entry.id);
+		const binding = parentInputRequestBindingOf(entry);
+		if (binding?.kind === "wake" && binding.wakeId === wake.wakeId) bound.add(binding.requestId);
+	}
+	for (let index = start; index < branch.length; index++) {
+		const entry = branch[index]!;
+		if (
+			entry.type === "provider_request_terminal" &&
+			bound.has(entry.requestId) &&
+			entry.outcome === "completed" &&
+			entry.assistantMessageEntryId
+		)
+			accepted.add(entry.assistantMessageEntryId);
+		if (
+			entry.type === "foreground_tool_terminal" &&
+			bound.has(entry.requestId) &&
+			accepted.has(entry.assistantMessageEntryId)
+		)
+			accepted.add(entry.resultMessageEntryId);
+	}
+	for (const id of accepted) priorHistory.delete(id);
+	return { admitsPriorEntry: (id) => !priorHistory.has(id), hasExcludedHistory: priorHistory.size > 0 };
 }
 
 export function parentWakeContent(wakeId: string, inputs: readonly ParentWakeInput[]): string {
@@ -777,24 +883,62 @@ export class ParentInputIndex {
 	pendingInputs(mode?: ParentInputMode): readonly PersistedParentInput[] {
 		return [...this.pending.values()].filter((input) => mode === undefined || input.metadata.mode === mode);
 	}
+	contextIds(): ReadonlySet<string> {
+		const ids = new Set(this.pendingInputs().map((input) => input.entryId));
+		const wake = this.openWake();
+		if (wake) ids.add(wake.entryId);
+		return ids;
+	}
 	openWake(): ParentInputWake | undefined {
 		return this.currentWakeId ? this.wakes.get(this.currentWakeId) : undefined;
 	}
 }
 
-export function pendingParentInputs(entries: readonly SessionEntry[]): PersistedParentInput[] {
+function branchParentInputs(entries: readonly SessionEntry[]): ParentInputIndex {
 	const index = new ParentInputIndex();
 	const byId = new Map(entries.map((entry) => [entry.id, entry]));
 	for (const entry of entries) index.apply(entry, (id) => byId.get(id));
-	return [...index.pendingInputs()];
+	return index;
+}
+
+export function pendingParentInputs(entries: readonly SessionEntry[]): PersistedParentInput[] {
+	return [...branchParentInputs(entries).pendingInputs()];
+}
+
+/** The saved deliveries an ordinary provider request cannot read, except through its active manifest. */
+export function hiddenParentInputIds(
+	pending: ReadonlySet<string>,
+	skipped: ReadonlySet<string>,
+	wake?: ParentInputWake,
+): ReadonlySet<string> {
+	const hidden = new Set([...pending, ...skipped]);
+	for (const input of wake?.inputs ?? []) hidden.delete(input.deliveryId);
+	return hidden;
 }
 
 export function parentInputContextIds(entries: readonly SessionEntry[]): ReadonlySet<string> {
-	const index = new ParentInputIndex();
-	const byId = new Map(entries.map((entry) => [entry.id, entry]));
-	for (const entry of entries) index.apply(entry, (id) => byId.get(id));
-	return new Set([
-		...index.pendingInputs().map((input) => input.entryId),
-		...[index.openWake()?.entryId].filter((id): id is string => id !== undefined),
-	]);
+	return branchParentInputs(entries).contextIds();
+}
+
+/** A checkpoint outlives request-local wake authorization. Pending inputs stay pinned for their own delivery. */
+export function parentCompactionInputs(index: ParentInputIndex | readonly SessionEntry[]) {
+	const ledger = index instanceof ParentInputIndex ? index : branchParentInputs(index);
+	const pending = new Set(ledger.pendingInputs().map((input) => input.metadata.deliveryId));
+	const hiddenIds = hiddenParentInputIds(pending, ledger.skippedInputs());
+	return {
+		preservedIds: ledger.contextIds(),
+		hasHiddenInputs: hiddenIds.size !== 0,
+		/** A body hidden from the summarizer still anchors checkpoint scopes and covered-through boundaries. */
+		project(entry: SessionEntry): SessionEntry {
+			const input = hiddenIds.size && entry.type === "custom_message" && parentInputOf(entry);
+			if (!input || !hiddenIds.has(input.metadata.deliveryId)) return entry;
+			return {
+				type: "custom",
+				customType: "withheld-parent-input",
+				id: entry.id,
+				parentId: entry.parentId,
+				timestamp: entry.timestamp,
+			};
+		},
+	};
 }

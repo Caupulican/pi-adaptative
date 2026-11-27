@@ -520,7 +520,11 @@ async function runTimeExhaustedSameThinkingSubleg(world: HarnessWorld): Promise<
 			).toContain("ran out of time after partial progress");
 		}),
 	);
-	world.systemOne.enterPhase("j9-l5-time", { ...J9_ROOT_JUDGMENTS, ...GOAL_STEP_JUDGMENTS });
+	world.systemOne.enterPhase("j9-l5-time", {
+		...J9_ROOT_JUDGMENTS,
+		...GOAL_STEP_JUDGMENTS,
+		covered_0: { kind: "noul", probability: 0.97 },
+	});
 	try {
 		const { session } = await world.createRootSession("root", {
 			sessionManager,

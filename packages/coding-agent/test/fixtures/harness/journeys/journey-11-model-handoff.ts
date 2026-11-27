@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { expect } from "vitest";
 import type { ModelTransferRecord } from "../../../../src/core/orchestration/model-transfer.ts";
 import type { AgentMessage } from "../../../../src/kernel/index.ts";
@@ -7,7 +8,14 @@ import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } fr
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import { handoffBlocks, J9_ROOT_JUDGMENTS, J9_ROOT_REPLY, J9_SETTINGS, workerReport } from "./journey-9-shared.ts";
 import { CREDENTIAL_HANDOFF_WARNINGS, refuseAfterCheckout } from "./journey-11-model-handoff-refusal.ts";
-import { LIMITS_PATH, latestBatchResults, NO_DELIVERY_CLAIMS, ORIGINAL_LIMITS, runJourney } from "./shared.ts";
+import {
+	LIMITS_PATH,
+	latestBatchResults,
+	NO_DELIVERY_CLAIMS,
+	ON_TRACK_WORKER_JUDGMENTS,
+	ORIGINAL_LIMITS,
+	runJourney,
+} from "./shared.ts";
 
 const TASK = "Update the retry limit in limits.ts in the isolated src workspace and verify its new value.";
 const BLOCKED_SUMMARY = "The retry edit is present; an independent reader must verify the value.";
@@ -30,7 +38,7 @@ async function exercise(
 	// Exercise the durable long-instruction representation through one real source/successor transfer.
 	const assignment =
 		sourceStatus === "running" && !refuseCredentials
-			? `${TASK}\n${"Inspect only limits.ts.\n".repeat(850)}Verify the final value.`
+			? `${TASK}\nRead the evidence file before editing.\n${"Edit only limits.ts.\n".repeat(850)}Verify the final value.`
 			: TASK;
 	const id = (label: string) => `handoff-${refuseCredentials ? "credential" : sourceStatus}-${label}`;
 	const delegate = (label: string, args: Record<string, unknown>) =>
@@ -38,11 +46,16 @@ async function exercise(
 	const done = (label: string) => text(id(label), J9_ROOT_REPLY);
 	let lastWorkingRequest: ScriptedRequest | undefined;
 	const afterEdit = createBarrier();
+	const evidenceGate = world.systemOne.enabled && sourceStatus === "running" ? createBarrier() : undefined;
 	const sourceGate = createBarrier();
 	const blockedWake = createBarrier();
 	const successorGate = createBarrier();
 	const completedWake = createBarrier();
-	world.systemOne.enterPhase(id("intake"), { ...J9_ROOT_JUDGMENTS, ...NO_DELIVERY_CLAIMS });
+	world.systemOne.enterPhase(id("intake"), {
+		...J9_ROOT_JUDGMENTS,
+		...NO_DELIVERY_CLAIMS,
+		...(evidenceGate && ON_TRACK_WORKER_JUDGMENTS),
+	});
 	const { session } = await world.createRootSession("root", {
 		settings: { ...J9_SETTINGS, worktreeSync: { enabled: true }, modelRouter: { fitnessGate: false } },
 	});
@@ -70,9 +83,8 @@ async function exercise(
 		});
 	if (sourceStatus === "running") {
 		// Distinct real reads build the accepted worker history without spending a model request per row.
-		world.provider.enqueue(
-			"worker-a",
-			calls(
+		world.provider.enqueue("worker-a", {
+			...calls(
 				id("evidence"),
 				Array.from({ length: HISTORY_ROWS }, (_, index) => ({
 					id: id(`evidence-${index}`),
@@ -80,7 +92,8 @@ async function exercise(
 					arguments: { path: "evidence.txt", offset: index + 1, limit: 1 },
 				})),
 			),
-		);
+			gate: evidenceGate?.promise,
+		});
 	}
 	world.provider.enqueue(
 		"worker-a",
@@ -143,6 +156,13 @@ async function exercise(
 		const started = receiptFor(session.messages, id("start"));
 		expect(started.isError, JSON.stringify(started.content)).toBe(false);
 		const { agentId } = started.details as { agentId: string };
+		if (evidenceGate) {
+			// The running worker is supervised after five calls and three seconds. Age it at its
+			// first provider request so those judgments occur independently of host speed.
+			await wait("worker-at-evidence", world.provider.whenReached(`worker-a:${id("evidence")}`));
+			await delay(3_100);
+			evidenceGate.release();
+		}
 		await wait("uncommitted-edit", afterEdit.promise);
 		if (sourceStatus === "blocked") {
 			sourceGate.release();
@@ -311,6 +331,7 @@ async function exercise(
 		world.faultMatrix.witness("worker-model-handoff", { control: true });
 		expect(await world.disposeSessionInBody(session)).toBeUndefined();
 	} finally {
+		evidenceGate?.release();
 		sourceGate.release();
 		successorGate.release();
 	}

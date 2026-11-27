@@ -26,6 +26,7 @@ import { SessionManager } from "../../../../src/kernel/session/session-manager.t
 import type { ScriptedRequest, ScriptStep } from "../scripted-provider.ts";
 import { calls, createBarrier, phasedReply, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, harnessPath, projectPath, withDeadline } from "../session-fixture.ts";
+import { scriptRequirementCheckSpawn } from "./journey-9-shared.ts";
 
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
@@ -74,6 +75,11 @@ import {
 } from "./shared.ts";
 
 export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Promise<void> {
+	const integrateVitest = "vitest run test/limits.test.ts";
+	const nativeCriterion = `Run ${JSON.stringify(integrateVitest)} and require exit code 0.`;
+	const setupRequest = world.systemOne.enabled
+		? "Set MAX_RETRIES to 5: start a worker on its lane, edit the rootwork lane to 4, commit it."
+		: nativeCriterion;
 	const trace = world.trace;
 	const integrated = createBarrier();
 	const workerMayEdit = createBarrier();
@@ -141,7 +147,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 				arguments: {
 					action: "start",
 					goalId: "retries-goal",
-					userGoal: "Set MAX_RETRIES to 5 and keep the owner's draft.",
+					userGoal: world.systemOne.enabled ? "Set MAX_RETRIES to 5 and keep the owner's draft." : nativeCriterion,
 				},
 			},
 		]),
@@ -477,6 +483,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	// asks the steering family. Worker task fitness stays undeclared because these journeys leave
 	// modelRouter.fitnessGate off. Each phase declares exactly what its turns ask.
 	const setupJudgments = {
+		scope_requested: { kind: "noul", probability: 0.97 },
 		changes_model_pools: { kind: "noul", probability: 0.02 },
 		local_commits_only: { kind: "noul", probability: 0.02 },
 		lifts_delivery_block: { kind: "noul", probability: 0.02 },
@@ -516,16 +523,13 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			optionalToolNames: ["secret_store"],
 		});
 	world.systemOne.enterPhase("mixed-setup", setupJudgments, {
-		expect: ownerWords("Set MAX_RETRIES to 5: start a worker on its lane, edit the rootwork lane to 4, commit it."),
+		expect: ownerWords(setupRequest),
 	});
-	await withDeadline(
-		trace,
-		"integration setup turn",
-		session.prompt("Set MAX_RETRIES to 5: start a worker on its lane, edit the rootwork lane to 4, commit it."),
-		120_000,
-	).catch((error: unknown) => {
-		throw new Error(`${error instanceof Error ? error.message : String(error)}\n${toolOutcomes(session)}`);
-	});
+	await withDeadline(trace, "integration setup turn", session.prompt(setupRequest), 120_000).catch(
+		(error: unknown) => {
+			throw new Error(`${error instanceof Error ? error.message : String(error)}\n${toolOutcomes(session)}`);
+		},
+	);
 	// The durable batch: the create receipt, the status result and the failing read are persisted under their own call ids, in call order.
 	const j3Batch = created.sessionManager
 		.getBranch()
@@ -1709,7 +1713,6 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			gate: e12OwnerRelease.promise,
 		},
 	);
-	const integrateVitest = "vitest run test/limits.test.ts";
 	let integrationAdmission:
 		| { readonly mainSha: string | undefined; readonly limits: string; readonly late: string }
 		| undefined;
@@ -2480,6 +2483,8 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		"complete",
 		{
 			...lateJudgments,
+			scope_requested: { kind: "noul", probability: 0.97 },
+			covered_0: { kind: "noul", probability: 0.97 },
 			shows_true_0: { kind: "noul", probability: 0.97 },
 			shows_false_0: { kind: "noul", probability: 0.02 },
 			shows_true_1: { kind: "noul", probability: 0.97 },
@@ -2600,6 +2605,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 							session.getGoalStateSnapshot()?.requirements ?? [],
 							integration,
 							e0Counters,
+							{ command: integrateVitest, output: integrationVitestOutput.join("") },
 						);
 					}
 				}
@@ -2736,7 +2742,8 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 						name: "goal",
 						arguments: {
 							action: "add_requirement",
-							text: COMPLETION_REQUIREMENT_TEXT,
+							text: world.systemOne.enabled ? COMPLETION_REQUIREMENT_TEXT : nativeCriterion,
+							...(!world.systemOne.enabled ? { check: { command: integrateVitest } } : {}),
 						},
 					},
 				],
@@ -2773,6 +2780,17 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			name: "goal-completed",
 			check: (request) => {
 				assertBatchOk(request, "complete-goal");
+				const source = session.messages.findLast(
+					(row) => row.role === "toolResult" && row.toolCallId === "complete-goal-1",
+				);
+				const delivered = request.context.messages.findLast(
+					(row) => row.role === "toolResult" && row.toolCallId === "complete-goal-1",
+				);
+				if (source?.role !== "toolResult") throw new Error("The completing call did not publish a tool result.");
+				expect(
+					delivered?.content,
+					"the report receives the complete published proof and its literal paths",
+				).toEqual(source.content);
 				if (!latestBatchResults(request).some((result) => result.text.includes("goal complete recorded"))) {
 					throw new Error("the host did not record the goal as complete");
 				}
@@ -2780,11 +2798,40 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			reply: { content: [{ type: "text", text: "The goal is complete." }] },
 		},
 	);
-	await withDeadline(
-		trace,
-		"retirement and completion turn",
-		session.prompt("Retire the workers and complete the goal."),
-	);
+	const nativeProof = world.systemOne.enabled ? undefined : scriptRequirementCheckSpawn(world, integrateVitest);
+	if (nativeProof)
+		world.shell.enqueue({
+			name: "native-integration-proof",
+			command: integrateVitest,
+			output: integrationVitestOutput,
+			exitCode: 0,
+			check: () => {
+				expect(world.io.readFileSync(LIMITS_PATH, "utf8")).toBe("export const MAX_RETRIES = 5;\n");
+				expect(world.io.readFileSync(projectPath("src", "late.ts"), "utf8")).toBe("export const LATE = true;\n");
+			},
+		});
+	try {
+		await withDeadline(
+			trace,
+			"retirement and completion turn",
+			session.prompt("Retire the workers and complete the goal."),
+		);
+	} finally {
+		nativeProof?.restore();
+	}
+	const completionAnswer = session.messages.at(-1);
+	expect(
+		completionAnswer,
+		`the completing submission delivers the saved proof to the owner: ${completionAnswer?.role === "assistant" ? (completionAnswer.errorMessage ?? completionAnswer.stopReason) : completionAnswer?.role}`,
+	).toMatchObject({
+		role: "assistant",
+		stopReason: "stop",
+		content: [{ type: "text", text: "The goal is complete." }],
+	});
+	if (nativeProof)
+		expect(session.getGoalStateSnapshot()?.evidence.some((item) => item.kind === "check" && item.verified)).toBe(
+			true,
+		);
 	trace.mark("root", "goal.completed");
 	if (world.systemOne.enabled) {
 		const accountQuestions = world.systemOne.decoded

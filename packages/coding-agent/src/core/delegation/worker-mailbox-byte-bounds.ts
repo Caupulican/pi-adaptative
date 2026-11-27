@@ -67,6 +67,12 @@ const MAX_ENCODED_MANDATORY_MESSAGE_BYTES =
 						id: index.toString(16).padStart(64, "0"),
 						revision: Number.MAX_SAFE_INTEGER,
 					})),
+					objectiveRouteOrigin: {
+						sessionId: "\0".repeat(MAX_ORCHESTRATION_IDENTIFIER_LENGTH),
+						objectiveId: "\0".repeat(MAX_ORCHESTRATION_IDENTIFIER_LENGTH),
+						cycleId: "\0".repeat(MAX_ORCHESTRATION_IDENTIFIER_LENGTH),
+						executor: "worker:escalated",
+					},
 					goalId: `g${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
 					requirementIds: Array.from(
 						{ length: MAX_ORCHESTRATION_COLLECTION_LENGTH },

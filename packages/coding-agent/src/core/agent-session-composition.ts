@@ -13,6 +13,7 @@ import type { AgentMessage } from "../kernel/types.ts";
 import { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
 import type { AdaptiveCapabilityController } from "./adaptive/adaptive-capability-controller.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
+import { orchestrationEventStoreDir } from "./agent-paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionConfig, AgentSessionEvent } from "./agent-session-contracts.ts";
 import type { CapabilityEnvelope, WorkerClaim } from "./autonomy/contracts.ts";
@@ -39,17 +40,29 @@ import { createDecisionProgram } from "./decision/program.ts";
 import type { ExpertSelectionService } from "./expert-routing/service.ts";
 import type { ContextUsage } from "./extensions/index.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
+import { prepareGoalCompletion } from "./goals/goal-completion-admission.ts";
+import { reviewCorrectedGoalOutcome } from "./goals/goal-correction-proof.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
+import { getGoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { GoalState } from "./goals/goal-state.ts";
-import { proveRequirementChecks, recordHostRequirementCheckProof } from "./goals/prove-requirement-checks.ts";
+import {
+	type GoalProofWriter,
+	proveRequirementChecks,
+	recordHostRequirementCheckProof,
+} from "./goals/prove-requirement-checks.ts";
+import { ownerSpecifiedRequirementCheck } from "./goals/session-goal-evidence.ts";
+import { hasRecordedGoalEvidence } from "./goals/session-goal-state.ts";
 import {
 	type HostRequirementChecks,
 	type RequirementCheckSession,
 	runSessionRequirementCheck,
 } from "./goals/session-requirement-check.ts";
-import { recordAcceptedWorkerRequirementEvidence } from "./goals/worker-requirement-evidence.ts";
+import {
+	currentWorkerEvidenceIds,
+	recordAcceptedWorkerRequirementEvidence,
+} from "./goals/worker-requirement-evidence.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import type { AutoLearnApplyPorts } from "./learning/auto-learn-proposals.ts";
 import { activeAutoLearnSkillContext } from "./learning/auto-learn-skill-evidence.ts";
@@ -62,7 +75,7 @@ import { assertCurrentGoalObjective } from "./objective-execution/current-object
 import { createRepoGitDelivery } from "./objective-execution/delivery-proof.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import { LedgerRouteCheckpoints } from "./objective-execution/ledger-route-checkpoints.ts";
-import type { ObjectiveRoute } from "./objective-execution/objective-route.ts";
+import type { ObjectiveRoute, RetrievalDisposition } from "./objective-execution/objective-route.ts";
 import {
 	createRepoReleaseDelivery,
 	type TrustedDeployAdapterRegistry,
@@ -77,6 +90,7 @@ import {
 } from "./operator-projection/session-operator-projection.ts";
 import type { AdaptationProjection } from "./operator-projection/types.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime-state.ts";
+import { goalObjectiveId } from "./orchestration/work-state-projection.ts";
 import { ReturnBriefController } from "./owner-decisions/return-brief-controller.ts";
 import type { OwnerInputLedger } from "./owner-input-ledger.ts";
 import type { ProfileFilterController } from "./profile-filter-controller.ts";
@@ -375,9 +389,13 @@ export interface SessionAdaptiveRuntimeAttachDeps {
 	getOperatorBlocker(): string | undefined;
 	getDecisionLedger(): DecisionLedgerStore | undefined;
 	readonly backgroundLanes: Pick<BackgroundLaneController, "getTaskRuntimeSnapshot">;
-	readonly goals: Pick<GoalSessionController, "objectiveRootExecutor">;
+	readonly goals: Pick<GoalSessionController, "objectiveRootExecutor" | "getRuntimeSnapshot" | "executionCustody">;
 	chooseObjectiveExecutor(route: ObjectiveRoute): "root" | "worker";
-	retrieveForObjective(route: ObjectiveRoute, signal?: AbortSignal): Promise<"root" | "worker" | undefined>;
+	retrieveForObjective(
+		route: ObjectiveRoute,
+		signal?: AbortSignal,
+		submitted?: (executor: "root" | "worker") => void,
+	): Promise<RetrievalDisposition | undefined>;
 	waitForObjectiveWorkers(context: unknown, signal?: AbortSignal): Promise<void>;
 	readonly workerSupervision: Pick<
 		WorkerSupervisionCoordinator,
@@ -387,7 +405,12 @@ export interface SessionAdaptiveRuntimeAttachDeps {
 	readonly repositoryObserver: Pick<RepositoryMutationObserver, "deliveryBlockReason" | "waitForQuiescence">;
 	readonly runtimeBuilder: Pick<
 		RuntimeBuilder,
-		"withTaskDirectoryContext" | "taskCwd" | "sessionConfinement" | "credentialExposureBoundary"
+		| "observeGoalEvidence"
+		| "goalCompletionSources"
+		| "withTaskDirectoryContext"
+		| "taskCwd"
+		| "sessionConfinement"
+		| "credentialExposureBoundary"
 	>;
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string | Promise<boolean> | boolean;
@@ -455,11 +478,46 @@ export function attachSessionAdaptiveRuntime(
 			sessionId: deps.sessionManager.getSessionId(),
 			cwd: deps.cwd,
 			getSnapshot: () => deps.backgroundLanes.getTaskRuntimeSnapshot(),
+			eventStoreRoot: orchestrationEventStoreDir(
+				deps.sessionManager.getStorageRoots().orchestrationHome,
+				deps.sessionManager.getSessionId(),
+			),
 		});
 		stack.objectiveController.bindSessionExecutors({
 			rootExecutor: deps.goals.objectiveRootExecutor(),
+			reviewCorrectedOutcome: async (id, signal) => {
+				const goal = deps.getGoalStateSnapshot();
+				if (!goal || goalObjectiveId(goal.goalId) !== id) return;
+				const reviewed = await reviewCorrectedGoalOutcome(
+					goal,
+					new Date().toISOString(),
+					{
+						engine: deps.getSemanticDecisionEngine,
+						observe: deps.runtimeBuilder.observeGoalEvidence,
+					},
+					signal,
+				);
+				signal?.throwIfAborted();
+				if (reviewed !== goal) deps.saveGoalStateSnapshot(reviewed, getGoalStateRevision(goal));
+			},
+			prepareGoalCompletion: (id) =>
+				prepareGoalCompletion(id, deps.getGoalStateSnapshot, deps.runtimeBuilder.goalCompletionSources()),
+			executionSignal: (id, activeOnly) =>
+				deps.goals.executionCustody.signalFor(id, deps.getGoalStateSnapshot(), activeOnly),
 			chooseExecutor: (route) => deps.chooseObjectiveExecutor(route),
-			retrieval: { execute: (route, signal) => deps.retrieveForObjective(route, signal) },
+			runnableRequirements: (objectiveId) => {
+				const goal = deps.getGoalStateSnapshot();
+				if (
+					goal &&
+					objectiveId === goalObjectiveId(goal.goalId) &&
+					goal.requirements.some((item) => item.status === "open")
+				)
+					return deps.goals.getRuntimeSnapshot({ maxStallTurns: 0 }).runnableRequirementIds;
+			},
+			retrieval: {
+				reportsAdmission: true,
+				execute: (route, signal, submitted) => deps.retrieveForObjective(route, signal, submitted),
+			},
 			waiter: { wait: (context, signal) => deps.waitForObjectiveWorkers(context, signal) },
 			checkpoints: ledgerRoutes,
 			stalls: ledgerRoutes,
@@ -483,12 +541,16 @@ export function attachSessionAdaptiveRuntime(
 			},
 			waitForRepositoryQuiescence: (objectiveId, signal) =>
 				deps.repositoryObserver.waitForQuiescence(objectiveId, signal),
-			proveRequirementChecks: (signal) =>
+			proveRequirementChecks: (signal, objectiveId) =>
 				deps.runtimeBuilder.withTaskDirectoryContext(async () => {
 					const goal = deps.getGoalStateSnapshot();
-					if (!goal) return undefined;
+					if (!goal || goalObjectiveId(goal.goalId) !== objectiveId) return undefined;
 					return proveRequirementChecks({
 						state: goal,
+						observeEvidence: deps.runtimeBuilder.observeGoalEvidence,
+						coverageEngine: deps.getSemanticDecisionEngine,
+						isCheckCoverageEstablished: (requirement) =>
+							ownerSpecifiedRequirementCheck(deps.sessionManager, goal, requirement),
 						runCheck: (check, checkSignal) =>
 							runSessionRequirementCheck(check, deps.runtimeBuilder, deps.runtimeBuilder.taskCwd, checkSignal),
 						now: () => new Date().toISOString(),
@@ -532,6 +594,7 @@ export function attachSessionAdaptiveRuntime(
 										assertCurrentGoalObjective(objectiveId, deps.getGoalStateSnapshot());
 										return deps.getSystemOneController()!.validateObjectivePostflight(objectiveId);
 									}),
+								syncOwnerCorrection: (entryId) => systemOneController.syncCanonicalTruth(entryId),
 								peekControlDirective: () => deps.getSystemOneController()!.peekControlDirective(),
 								consumeControlDirective: (directive) =>
 									deps.getSystemOneController()!.consumeControlDirective(directive),
@@ -916,12 +979,16 @@ export function createGoalProofWrites(deps: {
 	/** The session the checks run for: its confinement and credential boundary admit them, its commands' environment runs them. */
 	requirementCheckSession(): RequirementCheckSession;
 	getGoalState(): GoalState | undefined;
+	getSessionManager(): SessionManager;
 	saveGoalState(state: GoalState, expected: GoalStateRevision): string;
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined;
 	getWorkerClaimSnapshots(): readonly WorkerClaim[];
 	warn(message: string): void;
+	coverageEngine: GoalProofWriter["coverageEngine"];
+	isCheckCoverageEstablished: GoalProofWriter["isCheckCoverageEstablished"];
 }): {
 	/** Makes accepted worker proof citable by the goal's completion account, after every claim save and review acknowledgement. */
+	currentWorkerEvidenceIds(goal: GoalState): ReadonlySet<string>;
 	recordAcceptedWorkerEvidence(): void;
 	/** Runs the host's own checks for a worker attempt and records a passing one as the goal's proof of its requirement. */
 	readonly hostRequirementChecks: HostRequirementChecks;
@@ -934,6 +1001,8 @@ export function createGoalProofWrites(deps: {
 		}
 	};
 	return {
+		currentWorkerEvidenceIds: (goal) =>
+			currentWorkerEvidenceIds(goal, deps.getTaskRuntimeSnapshot(), deps.getWorkerClaimSnapshots()),
 		recordAcceptedWorkerEvidence: () =>
 			guarded("Worker evidence for the goal was not recorded", () =>
 				recordAcceptedWorkerRequirementEvidence({
@@ -941,14 +1010,33 @@ export function createGoalProofWrites(deps: {
 					saveGoalState: deps.saveGoalState,
 					getTaskRuntimeSnapshot: deps.getTaskRuntimeSnapshot,
 					getWorkerClaimSnapshots: deps.getWorkerClaimSnapshots,
+					warn: deps.warn,
 				}),
 			),
 		hostRequirementChecks: {
 			run: (check, cwd, signal) => runSessionRequirementCheck(check, deps.requirementCheckSession(), cwd, signal),
-			recordProof: (attemptId, requirementId, result) =>
-				guarded("The host check's proof for a goal requirement was not recorded", () =>
-					recordHostRequirementCheckProof(deps, { attemptId, requirementId, result }),
-				),
+			recordProof: async (attemptId, goalId, requirementId, definition, result, admission) => {
+				return recordHostRequirementCheckProof(
+					{
+						...deps,
+						hasRecordedEvidence: (goal, evidenceId) =>
+							hasRecordedGoalEvidence(deps.getSessionManager(), goal, evidenceId),
+					},
+					{
+						attemptId,
+						goalId,
+						requirementId,
+						definition,
+						result,
+						...(admission
+							? {
+									expectedLatestCheck: { evidenceId: admission.expectedLatestCheckEvidenceId },
+									isCurrentAttempt: admission.isCurrentAttempt,
+								}
+							: {}),
+					},
+				);
+			},
 		},
 	};
 }

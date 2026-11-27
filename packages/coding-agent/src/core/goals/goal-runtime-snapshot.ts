@@ -23,7 +23,10 @@ import {
 } from "./goal-continuation-controller.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "./goal-continuation-defaults.ts";
 import type { GoalState } from "./goal-state.ts";
-import { getLatestGoalStateSnapshot } from "./session-goal-state.ts";
+import { projectRunnableRequirements, requirementCoverageProbe } from "./requirement-dependencies.ts";
+import { attachCurrentWorkerEvidence, currentGoalRequirements } from "./requirement-proof.ts";
+import { getLatestGoalStateSnapshot, goalIdentityConflict } from "./session-goal-state.ts";
+import { currentWorkerEvidenceIds } from "./worker-requirement-evidence.ts";
 
 export interface GoalRuntimeSnapshotSettings {
 	maxStallTurns: number;
@@ -77,6 +80,7 @@ export interface GoalRuntimeSnapshot {
 	workerClaims: readonly WorkerClaim[];
 	learningDecisions: readonly LearningDecision[];
 	continuation: GoalContinuationDecision;
+	runnableRequirementIds?: readonly string[];
 	/**
 	 * Open (non-terminal) task_steps steps on the active branch, latest-wins. Read-only.
 	 * Optional (like `goalState`/`latestEvidenceBundle`) so hand-built snapshots in existing
@@ -221,6 +225,11 @@ export function buildGoalRuntimeSnapshot(args: {
 	let goalState = getLatestGoalStateSnapshot(args.sessionManager);
 	const latestEvidenceBundle = getLatestEvidenceBundleSnapshot(branchEntries);
 	const workerClaims = getWorkerClaimSnapshots(branchEntries);
+	if (goalState)
+		goalState = attachCurrentWorkerEvidence(
+			goalState,
+			currentWorkerEvidenceIds(goalState, args.taskRuntime, workerClaims),
+		);
 	const learningDecisions = getLearningDecisionSnapshots(branchEntries);
 
 	// Reuses the SAME branch-scoped primitive as goal-state resolution (getLatestCustomEntryOnBranch),
@@ -333,8 +342,22 @@ export function buildGoalRuntimeSnapshot(args: {
 			.flatMap((entry) => (entry.type === "message" ? [entry.message as AgentMessage] : [])),
 	).getActiveIds();
 	const watches = args.watches;
+	const boundWatches = goalState && boundWatchesOf(goalState, watches?.boundTo(goalState.goalId));
+	const readiness =
+		goalState &&
+		projectRunnableRequirements(
+			currentGoalRequirements(goalState),
+			new Set(boundWatches ? boundWatches.live.map((watch) => watch.requirementId) : []),
+			requirementCoverageProbe({
+				goal: goalState,
+				snapshot: () => args.taskRuntime,
+				claims: () => workerClaims,
+			}),
+			Date.parse(now),
+		);
 	const continuation = evaluateGoalContinuation({
 		state: goalState,
+		identityConflict: goalState && goalIdentityConflict(args.sessionManager, goalState),
 		settings: { maxStallTurns: args.settings.maxStallTurns },
 		...(activeVerificationIds.length > 0 ? { activeVerificationIds } : {}),
 		inFlightGoalLaneIds,
@@ -346,9 +369,11 @@ export function buildGoalRuntimeSnapshot(args: {
 		...(inFlightToolTaskIds.size > 0 ? { inFlightToolTaskIds } : {}),
 		...(planStepsInFlight > 0 ? { planStepsInFlight, planInFlightStepIds } : {}),
 		...(planRemainingMs !== undefined ? { planRemainingMs } : {}),
+		waitingExecutorRequirementIds: readiness?.waitingOnExecutor,
 		...(goalState && watches
 			? {
-					boundWatches: watches.boundTo(goalState.goalId),
+					boundWatches: boundWatches ? [...boundWatches.live, ...boundWatches.ended] : undefined,
+					waitingRequirementIds: readiness?.waitingOnWatch,
 					sessionWatchLive: watches.anyLive(),
 					outsideWaitRequirementIds: watches.waitsOutside(goalState),
 				}
@@ -361,6 +386,7 @@ export function buildGoalRuntimeSnapshot(args: {
 		workerClaims,
 		learningDecisions,
 		continuation,
+		runnableRequirementIds: readiness?.runnable,
 		openTaskSteps,
 		workState,
 		...(requirementWorktreeStates !== undefined ? { requirementWorktreeStates } : {}),

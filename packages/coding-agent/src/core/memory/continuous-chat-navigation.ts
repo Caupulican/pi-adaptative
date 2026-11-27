@@ -118,6 +118,11 @@ function rejected(reason: ContinuousChatNavigationRejection, message: string): C
 	return { status: "rejected", reason, message };
 }
 
+function decimalMessageId(text: string): number | undefined {
+	const id = Number(text);
+	return isNonNegativeSafeInteger(id) && String(id) === text ? id : undefined;
+}
+
 function workerNameProblem(name: string): string | undefined {
 	if (name.length === 0) return "Agent name must not be empty.";
 	if (Array.from(name).length > CONTINUOUS_CHAT_WORKER_NAME_MAX_CHARACTERS) {
@@ -193,7 +198,8 @@ function isWorkerLogPageFor(reply: ContinuousChatWorkerLogPage, name: string, pa
 }
 
 /**
- * Validates model-supplied `zoom` or `date` arguments. Unknown keys and wrong types are refused, never coerced.
+ * Validates model-supplied navigation arguments. A zoom range's n explicitly selects message IDs,
+ * so a quoted decimal ID in a range can be repaired without changing any valid agent lookup.
  */
 export function parseContinuousChatNavigationCommand(
 	tool: string,
@@ -204,13 +210,14 @@ export function parseContinuousChatNavigationCommand(
 	const allowedKeys = tool === "date" ? DATE_ARGUMENT_KEYS : ZOOM_ARGUMENT_KEYS;
 	const unknownKey = Object.keys(args).find((key) => !allowedKeys.includes(key));
 	if (unknownKey !== undefined) return invalidArguments(`Unknown ${tool} argument "${unknownKey}".`);
-	const id = args.id;
+	let id = args.id;
 	if (tool === "date") {
 		if (!isNonNegativeSafeInteger(id)) return invalidArguments("date id must be a non-negative safe integer.");
 		return { tool: "date", id };
 	}
 	const page = args.page === undefined ? 0 : args.page;
 	if (!isNonNegativeSafeInteger(page)) return invalidArguments("zoom page must be a non-negative safe integer.");
+	if (typeof id === "string" && args.n !== undefined) id = decimalMessageId(id) ?? id;
 	if (typeof id === "string") {
 		if (args.n !== undefined) return invalidArguments("zoom with an agent name takes no n.");
 		if (id !== id.trim()) return invalidArguments("Agent name must not have leading or trailing whitespace.");
@@ -421,12 +428,28 @@ export class ContinuousChatNavigator {
 		page: number,
 		context?: MemoryReadContext,
 	): Promise<ContinuousChatNavigationResult> {
-		if (this.workerLogs === undefined) {
-			return rejected("worker-log-unavailable", "Agent chat logs are not available.");
+		const id = decimalMessageId(name);
+		if (!this.workerLogs) {
+			return id !== undefined
+				? this.zoomMessage(id, page, context)
+				: rejected("worker-log-unavailable", "Agent chat logs are not available.");
 		}
 		const reply = await this.workerLogs.readPage(name, page, this.pageBytes);
 		assertMemoryReadActive(context);
-		if (reply === undefined) return rejected("not-found", `No page ${page} of agent ${name}.`);
+		if (reply === undefined) {
+			// A numeric worker owns all its pages. Resolve a quoted message ID only if that worker is absent.
+			if (id !== undefined) {
+				const first = page === 0 ? undefined : await this.workerLogs.readPage(name, 0, this.pageBytes);
+				assertMemoryReadActive(context);
+				if (first === undefined) return this.zoomMessage(id, page, context);
+				if (!isWorkerLogPageFor(first, name, 0, this.pageBytes))
+					return rejected(
+						"worker-log-unavailable",
+						`The agent chat log port returned an invalid page for ${name}.`,
+					);
+			}
+			return rejected("not-found", `No page ${page} of agent ${name}.`);
+		}
 		if (!isWorkerLogPageFor(reply, name, page, this.pageBytes)) {
 			return rejected("worker-log-unavailable", `The agent chat log port returned an invalid page for ${name}.`);
 		}

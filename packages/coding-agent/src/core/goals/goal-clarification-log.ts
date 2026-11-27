@@ -82,3 +82,17 @@ export function clarificationAnsweredEvent(input: {
 		now: input.now,
 	};
 }
+
+/** Bind the shared durable clarification writer to a session or its tool adapter. */
+export function sessionClarificationWriter(host: {
+	getGoalStateSnapshot(): GoalState | undefined;
+	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): unknown;
+}): (objectiveId: string, event: GoalClarificationEvent) => void {
+	const port = {
+		getGoalState: () => host.getGoalStateSnapshot(),
+		saveGoalState: (state: GoalState, expected?: GoalStateRevision) => host.saveGoalStateSnapshot(state, expected),
+	};
+	return (id, event) => {
+		recordObjectiveClarification(port, id, event);
+	};
+}

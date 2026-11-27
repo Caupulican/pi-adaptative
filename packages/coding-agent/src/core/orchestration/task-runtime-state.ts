@@ -3,6 +3,7 @@ import type { JsonObject } from "../autonomy/contracts.ts";
 import type { StoredOutcome } from "../delegation/worker-outcome-contract.ts";
 import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
 import type { HostEventProjection } from "../events/host-event-state.ts";
+import type { GoalObjectiveCursor } from "../goals/goal-correction-contract.ts";
 import type { PlanRuntimeState } from "../plan/plan-graph.ts";
 import type { AttemptUsageAccounting } from "./attempt-usage-generations.ts";
 import type {
@@ -32,6 +33,7 @@ import type { ModelTransferRecord } from "./model-transfer.ts";
 import type { WorkerReceiptAcknowledgement } from "./worker-receipt-publication.ts";
 
 export interface ObjectiveRuntimeState {
+	goalSource?: GoalObjectiveCursor;
 	objective: ObjectiveContract;
 	taskIds: readonly string[];
 	evidence: readonly EvidenceContract[];
@@ -133,6 +135,8 @@ export interface AttemptRuntimeState {
 	 * as last observed by its owner. Absent means retained, which is every attempt's initial state.
 	 */
 	managedLifetime?: ManagedLaneLifetime;
+	/** Earliest committed attempt.started, preserved through resume and terminal transitions. */
+	readonly firstStartedAt?: string;
 	executionStartedAt?: string;
 	createdAt: string;
 	updatedAt: string;
@@ -213,6 +217,7 @@ export interface OrchestrationProjectionSlotCounts {
 	checkpoints: number;
 	approvals: number;
 	notifications: number;
+	/** Independent observations. Derived goal coverage has a separate per-objective quota. */
 	evidence: number;
 }
 

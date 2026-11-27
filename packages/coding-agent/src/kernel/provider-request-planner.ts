@@ -14,7 +14,13 @@ import {
 	streamSimple,
 } from "@caupulican/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Message, Model } from "@caupulican/pi-ai/types";
-import { closingProviderHistory, preservesClosingInstruction, toolFreeRequestContext } from "./closing-request.ts";
+import {
+	closingProviderHistory,
+	preservesClosingInstruction,
+	reportDispatchObserver,
+	toolFreeRequestContext,
+} from "./closing-request.ts";
+import { admitCommittedReceiptSource, preservesCommittedToolReceipt } from "./committed-tool-receipt.ts";
 import { harnessLog } from "./harness-log.ts";
 import type {
 	AgentContext,
@@ -862,6 +868,8 @@ export async function startPlannedAgentProviderRequestWithId(
 			? []
 			: [sourceContext.trailingInstruction, ledgerView].filter((text): text is string => text !== undefined);
 		const planningSource = sourceContext;
+		if (sourceContext.committedToolReport)
+			admitCommittedReceiptSource(sourceContext.committedToolReport.receipt, sourceContext.messages);
 		const plan = await buildContextPlan(
 			sanitized.messages,
 			sourceContext.requestOpening,
@@ -930,6 +938,19 @@ export async function startPlannedAgentProviderRequestWithId(
 			}
 			// A prior wire prefix is optional. Its size is checked before admission, which always receives
 			// the very context transport will send. The fresh envelope remains the compactable floor.
+			const report = sourceContext.committedToolReport;
+			// An earlier cache window cannot restore a receipt withheld or changed by the current request policy.
+			if (
+				report &&
+				(!preservesCommittedToolReceipt(report.receipt, fresh.materialized.context.messages) ||
+					fresh.materialized.context.tools?.length)
+			)
+				throw new Error(
+					"The final report requires a tool-free request containing the recorded completion receipt.",
+				);
+
+			if (report && continued && !preservesCommittedToolReceipt(report.receipt, continued.messages))
+				continued = undefined;
 			const materialized = continued
 				? { ...fresh.materialized, context: { ...fresh.materialized.context, messages: continued.messages } }
 				: fresh.materialized;
@@ -1101,6 +1122,14 @@ export async function startPlannedAgentProviderRequestWithId(
 				{
 					...config,
 					...responseAccountScope.bind(requestAuth),
+					...(report?.beginDispatch
+						? {
+								providerResponseObserver: reportDispatchObserver(
+									report.beginDispatch,
+									config.providerResponseObserver,
+								),
+							}
+						: {}),
 					...(plan.isDispatchCurrent !== undefined || config.resolveResponseMode !== undefined
 						? {
 								requestGuard: (model: Model<Api>, dispatchSignal: AbortSignal | undefined): undefined => {

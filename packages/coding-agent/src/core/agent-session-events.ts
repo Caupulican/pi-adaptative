@@ -204,7 +204,13 @@ export class AgentSessionEvents {
 		if (event.type === "message_end") {
 			compactToolResultDetailsForRetention(event.message);
 			let messagePersisted = false;
-			if (this.ports.modelRouter().captureSessionMessage(event.message, event.origin)) {
+			if (
+				event.message.role === "custom" &&
+				this.ports.durableCustomMessageTurns().isPersistedSteer(event.message)
+			) {
+				this.ports.durableCustomMessageTurns().notePersisted(event.message);
+				messagePersisted = true;
+			} else if (this.ports.modelRouter().captureSessionMessage(event.message, event.origin)) {
 				// buffered by the router; persistence is deferred to the routed-turn flush
 			} else if (event.message.role === "custom") {
 				await this.ports

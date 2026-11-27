@@ -28,6 +28,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readAgentToolPolicyDeniedError } from "../../kernel/index.ts";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { CiAttemptTerminalEvent } from "../events/host-event-contract.ts";
 import type { GoalBoundWatch } from "../goals/goal-continuation-controller.ts";
 import { englishText, interfaceText } from "../language/interface-text.ts";
@@ -72,6 +73,7 @@ import {
 	owesFailedJobRead,
 } from "./github-watch-source.ts";
 import { OwnerStopArmingRefusal } from "./owner-stop-refusal.ts";
+import { projectRequirementWatches } from "./requirement-watch-projection.ts";
 import { SessionArmingNotes } from "./session-arming-notes.ts";
 import {
 	isLiveSessionWatch,
@@ -180,6 +182,13 @@ export interface SessionWatchServiceDeps {
 	readonly sessionId: string;
 	readonly timers: TimerPort;
 	readonly checks: WatchCheckAdmitter;
+	/** Rechecked after asynchronous admission and before selecting a current wait. */
+	requirementIsCurrent?(binding: SessionWatchRequirement): boolean;
+	admitRequirementBinding?(
+		binding: SessionWatchRequirement,
+		condition: SessionWatchSource,
+		signal?: AbortSignal,
+	): Promise<SessionWatchRequirement | undefined>;
 	/** Live routine watches an earlier build armed without the owner's words: they hold slots of the same bound. */
 	legacyAgentWatches(): number;
 	/** Live routine watches an earlier build armed for this worker runtime. */
@@ -199,7 +208,7 @@ export interface SessionWatchServiceDeps {
 		details: Readonly<Record<string, unknown>> | undefined,
 		owed: () => boolean,
 	): Promise<"delivered" | "settled">;
-	wakeWorker(runtimeId: string, text: string, key: string): WorkerWake;
+	wakeWorker(runtimeId: string, text: string, key: string, origin?: TurnOriginRecord): WorkerWake;
 	/** The session's transcript entry an arming happens at, which its wakes are charged to; undefined with none. */
 	armingEntry(): SessionWatchServed | undefined;
 	/** Shows the owner a warning in the session (owner-facing text, in the interface language). */
@@ -419,6 +428,14 @@ export class SessionWatchService implements WatchObservationStore {
 		const served = request.armedBy.kind === "worker" ? undefined : (request.served ?? this.deps.armingEntry());
 		let record: SessionWatchRecord;
 		try {
+			const binding =
+				request.forRequirement && this.deps.admitRequirementBinding
+					? await this.deps.admitRequirementBinding(request.forRequirement, admitted.condition, signal)
+					: request.forRequirement;
+			if (request.forRequirement && !binding)
+				this.deps.warnOwner(
+					"The watch is armed as an observation. Its condition could not be established as a reason to hold the requirement.",
+				);
 			// Built through the ledger's own codec, so no arming writes a record a reload would set aside.
 			record = parseSessionWatchRecord({
 				watchId: request.watchId,
@@ -433,7 +450,7 @@ export class SessionWatchService implements WatchObservationStore {
 				armedBy: request.armedBy,
 				...(request.tellOwner === true ? { tellOwner: true } : {}),
 				...(request.ciRunUnknown === true ? { ciRunUnknown: true } : {}),
-				...(request.forRequirement === undefined ? {} : { forRequirement: request.forRequirement }),
+				...(binding === undefined ? {} : { forRequirement: binding }),
 				...(served === undefined ? {} : { served }),
 				cursor: { kind: "watch", truth: null, fires: 0 },
 				status: "live",
@@ -441,6 +458,8 @@ export class SessionWatchService implements WatchObservationStore {
 			} satisfies SessionWatchRecord);
 			this.check(signal);
 			this.requireRoom(request);
+			if (request.forRequirement && this.deps.requirementIsCurrent?.(request.forRequirement) === false)
+				throw new Error("The requirement changed while its watch was being admitted. Re-read it before arming.");
 			this.deps.ledger.commit([
 				...this.deps.ledger.list().filter((entry) => entry.watchId !== request.watchId),
 				record,
@@ -536,31 +555,17 @@ export class SessionWatchService implements WatchObservationStore {
 		return view(cancelled);
 	}
 
-	/**
-	 * The watches bound to `goalId`'s requirements, the latest armed per requirement (one it replaced is history): live
-	 * while it waits before its end time, with what is left of it on the routines clock, or for its deadline read, with
-	 * what is left until that read is due to settle (it waits at most one read interval for the host's reader), else one
-	 * read interval, so a goal waiting on it always has a time to look again; else how it ended. Any other live record past
-	 * its end time has timed out, which the next expiry pass records.
-	 */
+	/** Current requirement waits, including bounded recovery of a pending deadline read. */
 	boundTo(goalId: string, nowMs = this.deps.timers.now()): GoalBoundWatch[] {
-		const latest = new Map<string, SessionWatchRecord>();
-		for (const record of this.deps.ledger.list()) {
-			const bound = record.forRequirement;
-			if (bound?.goalId !== goalId) continue;
-			const held = latest.get(bound.requirementId);
-			if (!held || held.armedAt <= record.armedAt) latest.set(bound.requirementId, record);
-		}
-		return [...latest].map(([requirementId, record]) => {
-			const { watchId, status, expiresAt } = record;
-			if (status === "live" && nowMs < expiresAt)
-				return { requirementId, watchId, status, remainingMs: expiresAt - nowMs };
-			// Its deadline read decides whether it fired or timed out; its wake tells which.
-			if (this.awaitsDeadlineRead(record, nowMs)) {
-				const due = (this.deadlineReads.get(record.incarnationId)?.since ?? nowMs) + GITHUB_WATCH_POLL_MS;
-				return { requirementId, watchId, status, remainingMs: due > nowMs ? due - nowMs : GITHUB_WATCH_POLL_MS };
-			}
-			return { requirementId, watchId, status: status === "live" ? "timed-out" : status };
+		return projectRequirementWatches({
+			records: this.deps.ledger.list(),
+			goalId,
+			nowMs,
+			isCurrent: (binding) => this.deps.requirementIsCurrent?.(binding) !== false,
+			deadlineDue: (record) =>
+				this.awaitsDeadlineRead(record, nowMs)
+					? (this.deadlineReads.get(record.incarnationId)?.since ?? nowMs) + GITHUB_WATCH_POLL_MS
+					: undefined,
 		});
 	}
 
@@ -1129,6 +1134,7 @@ export class SessionWatchService implements WatchObservationStore {
 			runtimeId,
 			sessionWatchWakeText(record, wake, WORKER_WAKE_PLAN_CHARS),
 			wake.deliveryId,
+			details.thirdParty === true ? { v: 1, k: "host-event", thirdParty: true } : undefined,
 		);
 		// A runtime that is gone settles the wake unwoken, as a routine watch's does.
 		if (woken.kind !== "refused") return "delivered";

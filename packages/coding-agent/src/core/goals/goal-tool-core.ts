@@ -1,11 +1,18 @@
+import { createHash } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { type BackgroundToolTaskRef, collectCitedRunningToolTaskIds } from "../background-tool-task-controller.ts";
+import { MAX_ORCHESTRATION_ACCEPTANCE_CRITERIA as MAX_GOAL_REQUIREMENTS } from "../orchestration/contracts.ts";
 import { taskStepReferencesRequirement } from "../tasks/task-projection.ts";
 import {
 	formatRequirementsLedgerLine,
+	generalOutcomeCitations,
+	getOutcomeCitations,
 	getTrustedRequirementEvidence,
-	getUnprovenGoalRequirementIds,
+	requirementKey,
+	requirementProofKey,
 } from "./goal-acceptance.ts";
+import { hasCurrentCorrectedOutcomeProof } from "./goal-correction-proof.ts";
+import { goalEvidenceHasRoom, MAX_GOAL_EVIDENCE } from "./goal-evidence-ledger.ts";
 import { formatGoalRecord, projectGoalRecord } from "./goal-record.ts";
 import { type GoalActionRefusal, refuseGoalAction } from "./goal-refusal.ts";
 import {
@@ -21,11 +28,16 @@ import {
 	MAX_GOAL_OBJECTIVE_LENGTH,
 	type RequirementCheck,
 } from "./goal-state.ts";
-import { unmetRequirementDependencies } from "./requirement-dependencies.ts";
+import { currentExecutorRefusal, unmetRequirementDependencies } from "./requirement-dependencies.ts";
+import { currentGoalRequirements } from "./requirement-proof.ts";
+
+/** Stable host identity shared by incremental requirements and atomic goal construction. */
+export function goalRequirementId(text: string, dependencies: readonly string[] = []): string {
+	const value = { text: text.trim(), dependencies: dependencies.map((id) => id.trim()).sort() };
+	return `req-${createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16)}`;
+}
 
 const MAX_GOAL_ID_LENGTH = 128;
-const MAX_GOAL_REQUIREMENTS = 256;
-const MAX_GOAL_EVIDENCE = 512;
 const MAX_GOAL_LEDGER_TEXT_LENGTH = 4_000;
 const MAX_GOAL_URI_LENGTH = 4_096;
 const MIN_AGENT_BLOCK_STALL_TURNS = 3;
@@ -50,7 +62,14 @@ export interface GoalStartGrant {
  * {@link GoalEvent}, so the durable state model stays the single source of truth.
  */
 export type GoalAction =
-	| { action: "start"; goalId: string; userGoal: string; tokenBudget?: number; ownerSourceId?: string }
+	| {
+			action: "start";
+			goalId: string;
+			userGoal: string;
+			tokenBudget?: number;
+			ownerSourceId?: string;
+			requirements?: readonly { text: string; check?: RequirementCheck }[];
+	  }
 	| {
 			action: "add_requirement";
 			requirementId: string;
@@ -89,6 +108,7 @@ export type GoalAction =
 			 */
 			verified?: boolean;
 			outcome?: GoalEvidenceOutcome;
+			requirementKey?: string;
 	  }
 	| { action: "progress" }
 	| { action: "no_progress" }
@@ -121,6 +141,8 @@ export interface ApplyGoalActionOptions {
 	 * completion ({@link completeGoalManually}) is never subject to this gate.
 	 */
 	requireVerifiedEvidenceForCompletion?: boolean;
+	/** Host-reviewed citation bundles. A key grants coverage only for the exact current requirement and citations. */
+	coverageProofs?: ReadonlySet<string>;
 	/**
 	 * Open (non-terminal) task_steps on this branch. Agent-facing complete refuses while any remain.
 	 */
@@ -210,6 +232,25 @@ function liveEvidenceCatalog(state: GoalState): string {
 	return formatGoalEvidenceCatalog(state);
 }
 
+export function nextRequirementToSatisfy(state: GoalState, requireProof: boolean) {
+	return state.requirements.find(
+		(requirement) =>
+			requirement.status === "open" ||
+			(requireProof &&
+				requirement.status === "satisfied" &&
+				getTrustedRequirementEvidence(state, requirement).length === 0),
+	);
+}
+
+export function unusedGoalEvidenceIds(state: GoalState, requireProof: boolean): string[] {
+	const used = new Set(
+		state.requirements.filter((item) => item.status === "satisfied").flatMap((item) => item.evidenceIds),
+	);
+	return state.evidence
+		.filter((item) => !used.has(item.id) && (!requireProof || isTrustedGoalEvidence(item)))
+		.map((item) => item.id);
+}
+
 /**
  * Apply one agent-facing goal action to the current ledger state.
  *
@@ -245,8 +286,26 @@ export function applyGoalAction(
 				newGoalId: goalId,
 			});
 		}
+		if (current?.goalId === goalId)
+			return { ok: false, error: `Goal ID '${goalId}' is already allocated. Choose a new goal ID for a new goal.` };
 		const { tokenBudget, ownerSourceId } = action;
-		return { ok: true, state: createGoalState({ goalId, userGoal, tokenBudget, ownerSourceId, now }) };
+		let state = createGoalState({ goalId, userGoal, tokenBudget, ownerSourceId, now });
+		for (const requirement of action.requirements ?? []) {
+			const added = applyGoalAction(
+				state,
+				{
+					action: "add_requirement",
+					requirementId: goalRequirementId(requirement.text),
+					text: requirement.text,
+					...(requirement.check ? { check: requirement.check } : {}),
+				},
+				now,
+				options,
+			);
+			if (!added.ok) return added;
+			state = added.state;
+		}
+		return { ok: true, state };
 	}
 
 	if (!current) {
@@ -267,20 +326,9 @@ export function applyGoalAction(
 
 	if (action.action === "increment") {
 		const requireVerifiedEvidence = options?.requireVerifiedEvidenceForCompletion ?? true;
-		const firstPending = current.requirements.find(
-			(requirement) =>
-				requirement.status === "open" ||
-				(requireVerifiedEvidence &&
-					requirement.status === "satisfied" &&
-					getTrustedRequirementEvidence(current, requirement).length === 0),
-		);
+		const firstPending = nextRequirementToSatisfy(current, requireVerifiedEvidence);
 		if (firstPending) {
-			const used = new Set(current.requirements.flatMap((requirement) => requirement.evidenceIds));
-			const unused = current.evidence
-				.filter(
-					(evidence) => !used.has(evidence.id) && (!requireVerifiedEvidence || isTrustedGoalEvidence(evidence)),
-				)
-				.map((evidence) => evidence.id);
+			const unused = unusedGoalEvidenceIds(current, requireVerifiedEvidence);
 			if (unused.length === 0) {
 				const evidenceKind = requireVerifiedEvidence ? " accepted as verified or user-confirmed" : "";
 				const requirementState = firstPending.status === "open" ? "open" : "unproven";
@@ -374,7 +422,8 @@ function toGoalEvent(
 					error: `satisfy_requirement requires a non-empty requirementId. ${liveRequirementCatalog(state)}`,
 				};
 			}
-			if (!requirementExists(state, id)) {
+			const requirement = state.requirements.find((candidate) => candidate.id === id);
+			if (!requirement) {
 				return { ok: false, error: `Unknown requirement '${id}'. ${liveRequirementCatalog(state)}` };
 			}
 			const requireVerified = options?.requireVerifiedEvidenceForCompletion !== false;
@@ -387,29 +436,38 @@ function toGoalEvent(
 					};
 				}
 			}
-			if (requireVerified && evidenceIds.length === 0) {
-				// A satisfy call that cites nothing adopts the evidence nobody has cited yet, exactly as
-				// `increment` does: the intent is unambiguous and the entries are already recorded.
-				// Measured live, the bare call was refused and the model spent the next turns guessing.
-				const used = new Set(state.requirements.flatMap((requirement) => requirement.evidenceIds));
-				evidenceIds = state.evidence
-					.filter((evidence) => !used.has(evidence.id) && isTrustedGoalEvidence(evidence))
-					.map((evidence) => evidence.id);
-			}
+			if (requireVerified && evidenceIds.length === 0) evidenceIds = unusedGoalEvidenceIds(state, true);
+			let proofKey: string | undefined;
 			if (requireVerified) {
-				const trustedEvidence = state.evidence.some(
-					(evidence) => evidenceIds.includes(evidence.id) && isTrustedGoalEvidence(evidence),
+				const citations = getOutcomeCitations(state, evidenceIds);
+				const key = requirementKey(requirement);
+				const scoped = citations.filter(
+					(item) => item.requirementKey === key && (!requirement.check || item.kind === "check"),
 				);
-				if (!trustedEvidence) {
+				const proven = !requirement.check && scoped.length > 0 ? scoped : generalOutcomeCitations(citations);
+				proofKey = requirementProofKey(requirement, proven);
+				if (
+					proven.length === 0 ||
+					(requirement.check && scoped.length === 0) ||
+					((scoped.length === 0 || requirement.check) && !options?.coverageProofs?.has(proofKey))
+				) {
 					return {
 						ok: false,
-						error: `Cannot satisfy requirement '${id}': cite at least one verified or user-confirmed evidence entry${
-							(action.evidenceIds ?? []).length === 0 ? " (none is recorded and unused)" : ""
-						}.`,
+						error: `Cannot satisfy requirement '${id}': the citations do not prove its outcome. Cite observed results that cover the requirement, or attach a check that verifies it.`,
 					};
 				}
+				evidenceIds = proven.map((item) => item.id);
 			}
-			return { ok: true, event: { type: "satisfy_requirement", id, evidenceIds: [...evidenceIds], now } };
+			return {
+				ok: true,
+				event: {
+					type: "satisfy_requirement",
+					id,
+					evidenceIds: [...evidenceIds],
+					...(proofKey ? { proofKey } : {}),
+					now,
+				},
+			};
 		}
 		case "block_requirement": {
 			const id = action.requirementId.trim();
@@ -447,8 +505,14 @@ function toGoalEvent(
 			if (requirement.status !== "open") {
 				return { ok: false, error: `Requirement '${id}' is not open (status: ${requirement.status}).` };
 			}
+			const refusal = currentExecutorRefusal(requirement, Date.parse(now));
+			if (refusal)
+				return {
+					ok: false,
+					error: `Cannot dispatch worker for '${id}': ${refusal.reason}. Executor admission is held until ${refusal.retryAt}; exhausted admission requires a changed execution strategy.`,
+				};
 			const unsatisfied = unmetRequirementDependencies(
-				state.requirements,
+				currentGoalRequirements(state),
 				requirement,
 				options?.dependencyCovered ?? (() => false),
 			);
@@ -476,7 +540,7 @@ function toGoalEvent(
 			if ((uri?.length ?? 0) > MAX_GOAL_URI_LENGTH) {
 				return { ok: false, error: `evidence uri must be at most ${MAX_GOAL_URI_LENGTH} characters.` };
 			}
-			if (state.evidence.length >= MAX_GOAL_EVIDENCE) {
+			if (!goalEvidenceHasRoom(state)) {
 				return { ok: false, error: `Goal already has the maximum ${MAX_GOAL_EVIDENCE} evidence entries.` };
 			}
 			if (evidenceExists(state, id)) {
@@ -492,6 +556,7 @@ function toGoalEvent(
 					uri: uri || undefined,
 					verified: action.verified,
 					outcome: action.outcome,
+					requirementKey: action.requirementKey,
 					now,
 				},
 			};
@@ -503,51 +568,48 @@ function toGoalEvent(
 		case "increment":
 			return { ok: false, error: "increment must be expanded by applyGoalAction." };
 		case "complete": {
+			const blockers: string[] = [];
+			if (!hasCurrentCorrectedOutcomeProof(state))
+				blockers.push(
+					"Cannot complete goal: the corrected owner outcome still requires fresh whole-outcome coverage review.",
+				);
 			const unsatisfied = state.requirements.filter((requirement) => requirement.status !== "satisfied");
-			if (unsatisfied.length > 0) {
-				return {
-					ok: false,
-					error: `Cannot complete goal: ${unsatisfied.length} requirement(s) not satisfied (${unsatisfied
-						.map((requirement) => requirement.id)
-						.join(", ")}).`,
-				};
-			}
+			if (unsatisfied.length > 0)
+				blockers.push(
+					`Cannot complete goal: ${unsatisfied.length} requirement(s) not satisfied (${unsatisfied.map((requirement) => requirement.id).join(", ")}).`,
+				);
 			const activeGoalLaneIds = [...new Set(options?.activeGoalLaneIds ?? [])];
-			if (activeGoalLaneIds.length > 0) {
-				return {
-					ok: false,
-					error: `Cannot complete goal: goal-owned worker lane(s) are still active (${activeGoalLaneIds.join(", ")}). Wait for their terminal handoffs or explicitly cancel them first.`,
-				};
-			}
-			const requireVerifiedEvidence = options?.requireVerifiedEvidenceForCompletion ?? true;
+			if (activeGoalLaneIds.length > 0)
+				blockers.push(
+					`Cannot complete goal: goal-owned worker lane(s) are still active (${activeGoalLaneIds.join(", ")}). Wait for their terminal handoffs or explicitly cancel them first.`,
+				);
 			const openStepIds = findOpenTaskStepIds(options?.openTaskSteps);
-			if (openStepIds.length > 0) {
-				return {
-					ok: false,
-					error: `Cannot complete goal: open task_steps work remains (${openStepIds.join(", ")}). Complete or explicitly cancel those steps first.`,
-				};
-			}
+			if (openStepIds.length > 0)
+				blockers.push(
+					`Cannot complete goal: open task_steps work remains (${openStepIds.join(", ")}). Complete or explicitly cancel those steps first.`,
+				);
 			const pendingToolTasks = findBlockingToolTasks(state, options?.backgroundToolTasks);
-			if (pendingToolTasks.length > 0) {
-				return {
-					ok: false,
-					error: `Cannot complete goal: goal-owned or cited tool_task(s) are still running (${pendingToolTasks.join(", ")}). Wait once via tool_task, then record the terminal result.`,
-				};
-			}
+			if (pendingToolTasks.length > 0)
+				blockers.push(
+					`Cannot complete goal: goal-owned or cited tool_task(s) are still running (${pendingToolTasks.join(", ")}). Wait once via tool_task, then record the terminal result.`,
+				);
 			const activePipeline = options?.activePipeline;
-			if (activePipeline && activePipeline.status === "active") {
-				return {
-					ok: false,
-					error: `Cannot complete goal: pipeline '${activePipeline.pipelineName}' run '${activePipeline.runId}' is still active. Increment or abandon it first.`,
-				};
+			if (activePipeline?.status === "active")
+				blockers.push(
+					`Cannot complete goal: pipeline '${activePipeline.pipelineName}' run '${activePipeline.runId}' is still active. Increment or abandon it first.`,
+				);
+			const requireVerifiedEvidence = options?.requireVerifiedEvidenceForCompletion ?? true;
+			if (requireVerifiedEvidence) {
+				const missingProof = state.requirements.filter(
+					(requirement) =>
+						requirement.status === "satisfied" && getTrustedRequirementEvidence(state, requirement).length === 0,
+				);
+				if (missingProof.length > 0)
+					blockers.push(
+						`Cannot complete goal: requirement(s) lack verified evidence (${missingProof.map((requirement) => requirement.id).join(", ")}). Record verified or user-confirmed evidence and cite it in satisfy_requirement.`,
+					);
 			}
-			const unprovenRequirementIds = getUnprovenGoalRequirementIds(state);
-			if (requireVerifiedEvidence && unprovenRequirementIds.length > 0) {
-				return {
-					ok: false,
-					error: `Cannot complete goal: requirement(s) lack verified evidence (${unprovenRequirementIds.join(", ")}). Record verified or user-confirmed evidence and cite it in satisfy_requirement.`,
-				};
-			}
+			if (blockers.length > 0) return { ok: false, error: blockers.join("\n") };
 			return {
 				ok: true,
 				event: { type: "complete_goal", acceptanceOverride: !requireVerifiedEvidence, now },

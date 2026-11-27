@@ -19,6 +19,7 @@ import {
 	WORKER_ROLES,
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
+import type { ObjectiveRouteOrigin } from "../orchestration/dispatch-request-fields.ts";
 import type { ModelTransferDispatch } from "../orchestration/model-transfer.ts";
 import { parseRiskBudget } from "../orchestration/risk-budget.ts";
 import type { WorkerReceiptAnchor, WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
@@ -256,6 +257,8 @@ export function parseWorkerParallelWorkIntent(value: unknown): WorkerParallelWor
 
 /** A profile is an optional preset; authority is compiled and persisted by the host. */
 export interface WorkerDelegationRequest {
+	/** Host-only objective decision that submitted this task. */
+	readonly objectiveRouteOrigin?: ObjectiveRouteOrigin;
 	/** Host-only link to the durable command that reserved this successor. */
 	modelTransfer?: ModelTransferDispatch;
 	instructions: string;
@@ -322,6 +325,8 @@ export interface WorkerDelegationRequest {
 	botSoul?: string;
 	profileId?: string;
 	authority?: WorkerDelegationAuthorityRequest;
+	/** Host-only: the selected model must match live admission before this route can run. */
+	requireExactModel?: boolean;
 	/** Tool-facing immutable birth-context selection for a newly admitted logical worker. */
 	forkTurns?: string;
 	/** Runtime-owned creator identity retained for recovery of legacy durable records. */

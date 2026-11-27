@@ -1,3 +1,4 @@
+import type { GoalOwnerCorrection } from "../goals/goal-correction-contract.ts";
 import type { TerminalCompletionProof } from "../system-one/controller.ts";
 import { TerminalCompletionConflictError, TerminalHookRejectedError } from "../system-one/controller.ts";
 import {
@@ -24,6 +25,7 @@ export async function finalizeDelivery(input: {
 	readonly objectiveId: string;
 	readonly evidenceRevision: number;
 	readonly candidateDigest: string;
+	readonly ownerCorrection?: GoalOwnerCorrection;
 	readonly snapshotIdentity: DeliveryBundle["candidate_snapshot"];
 	readonly steeringCertRefs: string[];
 	readonly holdOnUnsettled?: boolean;
@@ -48,7 +50,11 @@ export async function finalizeDelivery(input: {
 		const judgment = await judgeTransition(
 			input.steeringPlane,
 			"JEV-027",
-			{ ...bundle, candidateSnapshot: input.snapshotIdentity },
+			{
+				...bundle,
+				candidateSnapshot: input.snapshotIdentity,
+				...(input.ownerCorrection ? { ownerCorrection: input.ownerCorrection } : {}),
+			},
 			{
 				objectiveId: input.objectiveId,
 				evidenceRevision: input.evidenceRevision,
@@ -89,6 +95,7 @@ export async function finalizeDelivery(input: {
 				{
 					objectiveId: input.objectiveId,
 					candidateDigest: input.candidateDigest,
+					ownerCorrectionEntryId: input.ownerCorrection?.ownerEntryId,
 					deliveryCertificateId: steeringCertRefs[steeringCertRefs.length - 1],
 					finalCommit: bundle.final_commit,
 					pushRefs: bundle.push_refs,

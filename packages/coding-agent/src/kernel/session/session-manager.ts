@@ -30,17 +30,18 @@ import {
 } from "./lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import {
+	appendWithParentInputGuard,
 	assertParentInputVisible,
 	isParentNoteOwnerId,
 	MAX_PARENT_WAKE_CHARS,
 	MAX_PARENT_WAKE_INPUTS,
 	MAX_PENDING_PARENT_INPUTS,
 	PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
-	PARENT_INPUT_SETTLED_CUSTOM_TYPE,
 	PARENT_INPUT_SKIPPED_CUSTOM_TYPE,
 	PARENT_INPUT_WAKE_CUSTOM_TYPE,
 	PARENT_INPUT_WAKE_REQUEST_CUSTOM_TYPE,
 	PARENT_NOTE_REQUEST_CUSTOM_TYPE,
+	type ParentInputAppendGuard,
 	type ParentInputAppendReceipt,
 	type ParentInputConsumptionSource,
 	ParentInputIndex,
@@ -49,10 +50,13 @@ import {
 	type ParentInputWake,
 	type ParentNoteSelection,
 	type PersistedParentInput,
+	parentCompactionInputs,
 	parentInputMetadataOfMessage,
 	parentNoteMarker,
 	parentWakeContent,
 	parentWakeMarker,
+	parentWakeRequestWindow,
+	parentWakeSettlementEntries,
 } from "./parent-input-ledger.ts";
 import {
 	ParentInputConsumptionSources,
@@ -81,11 +85,11 @@ import {
 	advanceSessionContextCache,
 	buildSessionContext,
 	cloneSessionContext,
-	customMessageEntries,
 	deliveredOwnerInput,
 	deliveredTurnOrigin,
 	deliveredWorkerControl,
 	type SessionContextCache,
+	sessionContextMessageEntries,
 } from "./session-context-builder.ts";
 import { getDefaultSessionDir, getDefaultSessionDirCandidates } from "./session-default-dirs.ts";
 import type {
@@ -111,6 +115,7 @@ import { MAX_SESSION_ENTRY_VISIT_COUNT } from "./session-entry-limits.ts";
 import {
 	canOffloadSessionAppend,
 	publishSessionFileExclusive,
+	withCurrentSessionAppend,
 	withSessionFileMutation,
 } from "./session-file-admission.ts";
 import {
@@ -388,7 +393,9 @@ export class SessionManager {
 	private parentInputCache:
 		| { byId: Map<string, SessionEntry>; leafId: string | null; index: ParentInputIndex }
 		| undefined;
-	private activeParentWake: { wakeId: string; assertCurrent: () => void } | undefined;
+	private activeParentWake:
+		| { wakeId: string; assertCurrent: () => void; window: ReturnType<typeof parentWakeRequestWindow> }
+		| undefined;
 	private parentNoteAdmission:
 		| {
 				epoch: number;
@@ -1356,8 +1363,8 @@ export class SessionManager {
 			if (entry?.type === "message" && entry.message === message) return messageEntryId;
 			this.messageEntryIndex.ids.delete(message);
 		}
-		const customEntry = customMessageEntries.get(message);
-		return customEntry !== undefined && this.byId.get(customEntry.id) === customEntry ? customEntry.id : undefined;
+		const entry = sessionContextMessageEntries.get(message);
+		return entry && this.byId.get(entry.id) === entry ? entry.id : undefined;
 	}
 
 	/** Whether this exact durably committed entry still belongs to the current branch. */
@@ -1541,7 +1548,7 @@ export class SessionManager {
 			identity,
 			onCommitted,
 			beforeNotify: () => {
-				for (const { message, entry } of customBindings) customMessageEntries.set(message, entry);
+				for (const { message, entry } of customBindings) sessionContextMessageEntries.set(message, entry);
 			},
 		});
 		return entries.map((entry) => entry.id);
@@ -2009,14 +2016,15 @@ export class SessionManager {
 		return index;
 	}
 
+	getParentCompactionInputs() {
+		return parentCompactionInputs(this._parentInputIndex());
+	}
+
 	getPendingParentInputs(mode?: ParentInputMode): readonly PersistedParentInput[] {
 		return this._parentInputIndex().pendingInputs(mode);
 	}
 
-	/**
-	 * The saved input of a delivery on any branch, pending or consumed. A replayed delivery must repeat its saved
-	 * metadata exactly (`appendParentInput`), so a caller that chooses a mode reads the saved one first.
-	 */
+	/** The saved input on any branch. Replay must match its exact metadata, including mode. */
 	getParentInput(deliveryId: string): PersistedParentInput | undefined {
 		return this.parentInputReceipts.find(deliveryId);
 	}
@@ -2026,11 +2034,7 @@ export class SessionManager {
 		return this._parentInputIndex().skippedInputs();
 	}
 
-	/**
-	 * Records that a held next-owner-turn input became stale before the owner saw it. An input an owner turn already
-	 * selected, or a provider request carries, is going to the owner and stays: the result is `false`, as for an input
-	 * that is not pending on this branch.
-	 */
+	/** Skip a stale held note. Returns false for selected, bound or no longer pending inputs. */
 	skipPendingParentInput(deliveryId: string, reason: string): boolean {
 		this.assertMutationReady();
 		const held = () =>
@@ -2161,6 +2165,8 @@ export class SessionManager {
 				selectionId,
 				isCurrent: () => {
 					admission.assertCurrent();
+					if (owner.ownerEntryId && this.activeParentWake?.window.admitsPriorEntry(owner.ownerEntryId) === false)
+						return false;
 					const pending = new Set(this.getPendingParentInputs("next-owner-turn").map((input) => input.entryId));
 					return this.parentNoteAdmission === admission && inputs.every((input) => pending.has(input.entryId));
 				},
@@ -2237,7 +2243,7 @@ export class SessionManager {
 		active.assertCurrent();
 		const wake = this.getParentInputWake();
 		if (wake?.wakeId !== active.wakeId) throw new Error("Active parent wake no longer matches its manifest.");
-		return wake;
+		return { ...wake, window: active.window };
 	}
 
 	getActiveParentInputIds(): ReadonlySet<string> {
@@ -2263,10 +2269,7 @@ export class SessionManager {
 	}
 
 	/** The physical parent-input boundary; lookup and append share the canonical transcript lock. */
-	appendParentInput(
-		message: CustomMessage<unknown>,
-		withAppend?: (append: () => ParentInputAppendReceipt) => ParentInputAppendReceipt,
-	): ParentInputAppendReceipt {
+	appendParentInput(message: CustomMessage<unknown>, withAppend?: ParentInputAppendGuard): ParentInputAppendReceipt {
 		this.assertMutationReady();
 		const metadata = parentInputMetadataOfMessage(message);
 		if (!metadata) throw new Error("Parent input metadata is required.");
@@ -2287,17 +2290,25 @@ export class SessionManager {
 			}
 			if (index.pendingInputs().length >= MAX_PENDING_PARENT_INPUTS)
 				throw new Error("Pending parent input capacity exceeded.");
-			let admissionOpen = true;
-			const append = (): ParentInputAppendReceipt => {
-				if (!admissionOpen) throw new Error("Parent input append admission has ended.");
-				admissionOpen = false;
-				return { ...this._appendParentMessage(message), created: true };
-			};
-			try {
-				return withAppend ? withAppend(append) : append();
-			} finally {
-				admissionOpen = false;
-			}
+			return appendWithParentInputGuard(() => this._appendParentMessage(message), withAppend);
+		});
+	}
+
+	/** Replay lookup and live producer admission share the transcript lock with the steered body. */
+	appendSteeredParentInput(
+		message: CustomMessage<unknown>,
+		origin: ParentInputOrigin,
+		alreadyAccepted: () => boolean,
+		guard?: ParentInputAppendGuard,
+		beforeAppend?: () => void,
+	): boolean {
+		return this._withParentInputMutation(origin, () => {
+			if (alreadyAccepted()) return false;
+			appendWithParentInputGuard(() => {
+				beforeAppend?.();
+				return this._appendParentMessage(message);
+			}, guard);
+			return true;
 		});
 	}
 
@@ -2325,9 +2336,14 @@ export class SessionManager {
 	}
 
 	activateParentInputWake(wakeId: string): () => void {
-		if (this.activeParentWake || this._parentInputIndex().openWake()?.wakeId !== wakeId)
+		const wake = this.getParentInputWake();
+		if (this.activeParentWake || wake?.wakeId !== wakeId)
 			throw new Error("Parent wake is not available for execution.");
-		const active = { wakeId, assertCurrent: this.captureBranchContext() };
+		const active = {
+			wakeId,
+			assertCurrent: this.captureBranchContext(),
+			window: parentWakeRequestWindow(this.getBranch(), wake),
+		};
 		this.activeParentWake = active;
 		return () => {
 			if (this.activeParentWake === active) this.activeParentWake = undefined;
@@ -2367,27 +2383,17 @@ export class SessionManager {
 			const ids = pendingIdSpace(this.byId);
 			const id = generateId(ids);
 			ids.add(id);
-			const timestamp = new Date().toISOString();
-			const makeCustom = (
-				entryId: string,
-				parentId: string | null,
-				customType: string,
-				data: unknown,
-			): CustomEntry => ({
-				type: "custom",
-				id: entryId,
-				parentId,
-				timestamp,
-				customType,
-				data,
-			});
-			const settlement = makeCustom(id, this.leafId, PARENT_INPUT_SETTLED_CUSTOM_TYPE, {
-				version: 1,
+			const entries = parentWakeSettlementEntries(
 				wakeId,
-				...current.completed,
-			});
-			const report = makeCustom(generateId(ids), id, PARENT_INPUT_CONSUMED_CUSTOM_TYPE, consumption);
-			this._appendEntries([settlement, report]);
+				current.completed,
+				consumption,
+				this.leafId,
+				id,
+				generateId(ids),
+				new Date().toISOString(),
+			);
+			this._appendEntries(entries);
+			const report = entries[1];
 			if (!this.isEntryDurableForSession(report.id)) throw new Error("Parent wake settlement was not persisted.");
 		});
 	}
@@ -2407,18 +2413,14 @@ export class SessionManager {
 		}
 		if (!this.hasDurableSessionFile() || !this.sessionFile || this.persistenceStateUncertain)
 			throw new Error("Parent input requires a healthy durable session file.");
-		return withSessionFileMutation(
+		return withCurrentSessionAppend(
 			this.getStorageRoots(),
 			this.sessionFile,
-			this.sessionId,
-			"append",
+			{ session: this, revision: this.storageRevision },
 			() => {
-				if (!this.storageRevision || !sameFileVersion(this.storageRevision, statSync(this.sessionFile!)))
-					throw new Error("Parent session changed on disk; reopen it before delivering input.");
 				assertOrigin();
 				return operation();
 			},
-			{ session: this, revision: this.storageRevision },
 		);
 	}
 
@@ -2449,7 +2451,7 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 		};
 		this._appendEntry(entry, () => {
-			if (source !== undefined) customMessageEntries.set(source, entry);
+			if (source !== undefined) sessionContextMessageEntries.set(source, entry);
 		});
 		return entry.id;
 	}

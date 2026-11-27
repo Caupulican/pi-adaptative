@@ -119,12 +119,18 @@ import {
 } from "./extensions/index.ts";
 import { disposeExtensionEventSubscriptions } from "./extensions/lifecycle.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
-import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
-import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
+import { sessionClarificationWriter } from "./goals/goal-clarification-log.ts";
+import type { GoalCompletionSources } from "./goals/goal-completion-admission.ts";
+import { type GoalEvidenceRef, type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import type { GoalStartGrant } from "./goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
-import { resolveSessionToolEvidence, resolveSessionUserEvidence } from "./goals/session-goal-evidence.ts";
+import { admitGoalWork, type GoalWorkSource } from "./goals/goal-work-admission.ts";
+import { sessionGoalCompletionSources } from "./goals/session-goal-completion.ts";
+import {
+	createSessionGoalEvidenceReader,
+	ownerSpecifiedRequirementCheck,
+	resolveSessionUserEvidence,
+} from "./goals/session-goal-evidence.ts";
 import { runSessionRequirementCheck, sessionRequirementCheckViolation } from "./goals/session-requirement-check.ts";
 import { createImprovementLoopTool } from "./improvement-loop.ts";
 import { settleIndependentLifecycle } from "./lifecycle-settlement.ts";
@@ -208,7 +214,7 @@ import {
 	wrapToolWithVerification,
 } from "./system-one/session-verification-host.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
-import { COMPLETION_FINDING_SOURCE, PEER_REVIEW_EVIDENCE_SOURCE } from "./system-one/verification-coordinator.ts";
+import { PEER_REVIEW_EVIDENCE_SOURCE } from "./system-one/verification-coordinator.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { deriveOpenTaskStepRefs } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
@@ -227,7 +233,12 @@ import type { FileEncodingRule } from "./tools/file-encoding-metadata.ts";
 import { FileMutationIntentController } from "./tools/file-mutation-intent.ts";
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import { createFindTool } from "./tools/find.ts";
-import { createGoalLifecycleToolDefinitions, createGoalToolDefinition, type GoalToolInput } from "./tools/goal.ts";
+import {
+	createGoalLifecycleToolDefinitions,
+	createGoalToolDefinition,
+	type GoalToolDependencies,
+	type GoalToolInput,
+} from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
 import { createImageGenerateToolDefinition } from "./tools/image-generate.ts";
 import { createLookupToolDefinition } from "./tools/lookup.ts";
@@ -494,7 +505,8 @@ export interface RuntimeBuilderDeps {
 
 	/** Goal-tool state accessors. */
 	getGoalStateSnapshot(): GoalState | undefined;
-	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
+	saveGoalStateSnapshot(...args: Parameters<GoalToolDependencies["saveGoalState"]>): string;
+	prepareCompletionPresentation?: GoalToolDependencies["prepareCompletionPresentation"];
 	/** Why automatic continuation is stopped for a lasting reason, for the goal tool's `get`. */
 	getGoalAutoContinueNote?(): string | undefined;
 	/**
@@ -541,6 +553,8 @@ export interface RuntimeBuilderDeps {
 		signal?: AbortSignal,
 	): Promise<{ authorized: boolean; reason?: string; correction?: string }>;
 	/** Authorize model-facing goal creation: its exact owner-requested token ceiling and the owner source it records. */
+	goalExecutionSignal?: GoalToolDependencies["executionSignal"];
+	getGoalWorkSource?(): GoalWorkSource | undefined;
 	authorizeGoalStartFromTool?(input: Pick<GoalToolInput, "userGoal" | "tokenBudget">): string | GoalStartGrant;
 	/** Native task-step state accessors. */
 	getTaskStepsStateSnapshot(): TaskStepsState | undefined;
@@ -714,6 +728,12 @@ export class RuntimeBuilder {
 	}
 	private readonly _taskAutomationAdapter: TaskAutomationRuntimeAdapter;
 	private readonly deps: RuntimeBuilderDeps;
+	private readonly _goalEvidence = createSessionGoalEvidenceReader({
+		manager: () => this.deps.getSessionManager(),
+		tasks: () => this.deps.getToolTaskDependencies?.().list() ?? [],
+		isBuiltin: (name) => this.getToolSourceInfo(name)?.source === "builtin",
+	});
+	readonly observeGoalEvidence = (evidence: GoalEvidenceRef) => this._goalEvidence.observe(evidence);
 
 	constructor(deps: RuntimeBuilderDeps) {
 		this.deps = deps;
@@ -1032,6 +1052,10 @@ export class RuntimeBuilder {
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
 		return this._toolDefinitions.get(name)?.definition;
+	}
+
+	goalCompletionSources(): GoalCompletionSources {
+		return sessionGoalCompletionSources(this.deps, () => this._taskDirectories.cwd);
 	}
 
 	/** Whether the current tool generation holds a goal tool, the only way a goal the session holds is followed and closed. */
@@ -1856,21 +1880,17 @@ export class RuntimeBuilder {
 									systemOneEvidenceStore.save(toolCallId, { completionDecision: decision }),
 							}
 						: {}),
-					getActiveVerificationIds: () => [
-						...(this.deps.getActiveVerificationIds?.() ?? []),
-						...(this.deps
-							.getSystemOneController?.()
-							?.verification.status()
-							.obligations.filter((item) => item.source !== COMPLETION_FINDING_SOURCE)
-							.map((item) => item.id) ?? []),
-					],
+					...this.goalCompletionSources(),
+					executionSignal: this.deps.goalExecutionSignal,
 					getSystemOneController: () => this.deps.getSystemOneController?.(),
-					...(this.deps.getCompletionRuleRefusal
-						? {
-								getCompletionRuleRefusal: (toolCallId: string) =>
-									this.deps.getCompletionRuleRefusal?.(toolCallId),
-							}
-						: {}),
+					requirementCoverageEngine: () => this.deps.getSemanticDecisionEngine?.(),
+					isCheckCoverageEstablished: (requirement) =>
+						ownerSpecifiedRequirementCheck(
+							this.deps.getSessionManager(),
+							this.deps.getGoalStateSnapshot(),
+							requirement,
+						),
+					getCompletionRuleRefusal: (toolCallId) => this.deps.getCompletionRuleRefusal?.(toolCallId),
 					admitRequirementCheck: (check) => sessionRequirementCheckViolation(check, this, this.taskCwd),
 					buildCompletionProofSheet: (input) => {
 						const sessionManager = this.deps.getSessionManager();
@@ -1894,24 +1914,25 @@ export class RuntimeBuilder {
 							this._taskAutomationAdapter.getCombinedScripts(this.deps.getSettingsManager().getToolkitScripts()),
 							this._taskDirectories.cwd,
 						),
+					admitWork: this.deps.getGoalWorkSource
+						? (proposal, signal) =>
+								admitGoalWork(
+									proposal,
+									() => this.deps.getGoalWorkSource?.(),
+									this.deps.getSemanticDecisionEngine?.(),
+									signal,
+								)
+						: undefined,
 					authorizeStart: (input) => this.deps.authorizeGoalStartFromTool?.(input) ?? { tokenBudget: null },
-					saveGoalState: (state, expected) => {
-						this.deps.saveGoalStateSnapshot(state, expected);
-					},
-					resolveToolEvidence: (uri, kind) =>
-						resolveSessionToolEvidence(
-							this.deps.getSessionManager(),
-							this.deps.getToolTaskDependencies?.().list() ?? [],
-							uri,
-							kind,
-							(toolName) => this.getToolSourceInfo(toolName)?.source === "builtin",
-						),
+					prepareCompletionPresentation: this.deps.prepareCompletionPresentation,
+					saveGoalState: (...args) => this.deps.saveGoalStateSnapshot(...args),
+					resolveToolEvidence: this._goalEvidence.resolve,
 					resolveUserEvidence: (summary, uri) =>
 						resolveSessionUserEvidence(this.deps.getSessionManager(), summary, uri),
 					// kind:"worker" evidence refs verify against the SAME live lane/claim accessors the
 					// delegate action=status uses below -- live wiring (these were declared optional
 					// and read-defensive on the goal-tool deps type).
-					getLaneRecords: () => this.deps.getWorkerLaneRecords(),
+
 					getWorkerClaimSnapshots: () => this.deps.getWorkerClaimSnapshots(),
 					getTaskRuntimeSnapshot: () => this.deps.getTaskRuntimeSnapshot?.(),
 					// dispatch_worker's tool-layer side effect for the default (in_process) route: starts a
@@ -1929,7 +1950,7 @@ export class RuntimeBuilder {
 						return outcome.started ? { laneId: outcome.record.laneId } : { skipReason: outcome.skipReason };
 					},
 					// Goal dispatch uses the same admitted pi_collaboration fire_task path as a model call.
-					dispatchCollaborationWorker: (args) =>
+					dispatchCollaborationWorker: (args, signal) =>
 						dispatchCollaborationWorker(
 							{
 								getToolDefinition: (name) => this.getToolDefinition(name),
@@ -1960,24 +1981,10 @@ export class RuntimeBuilder {
 									: undefined,
 							},
 							args,
+							signal,
 						),
 					cwd: () => this._taskDirectories.cwd,
 					// Reuses the branch-scoped getTaskStepsStateSnapshot dep: the cross-visibility nudge needs no new read.
-					getOpenTaskSteps: () => deriveOpenTaskStepRefs(this.deps.getTaskStepsStateSnapshot()),
-					getBackgroundToolTasks: () => this.deps.getToolTaskDependencies?.().list() ?? [],
-					getActivePipeline: () => {
-						const run = resolveCurrentProjectPipelineRun(
-							this._taskDirectories.cwd,
-							this.deps.getPipelineRunSnapshot(),
-						);
-						if (!run || !isPipelineRunActive(run)) return undefined;
-						return {
-							runId: run.runId,
-							pipelineName: run.pipelineName,
-							goalId: run.goalId,
-							status: run.status,
-						};
-					},
 				});
 				if (toolAccess.allows(LEGACY_GOAL_TOOL_NAME)) {
 					this._baseToolDefinitions.set(
@@ -2083,18 +2090,7 @@ export class RuntimeBuilder {
 					},
 					getSemanticDecisionEngine: () => this.deps.getSemanticDecisionEngine?.(),
 					...this.deps.askQuestionRouting?.(),
-					recordObjectiveClarification: (objectiveId, event) => {
-						recordObjectiveClarification(
-							{
-								getGoalState: () => this.deps.getGoalStateSnapshot(),
-								saveGoalState: (state, expected) => {
-									this.deps.saveGoalStateSnapshot(state, expected);
-								},
-							},
-							objectiveId,
-							event,
-						);
-					},
+					recordObjectiveClarification: sessionClarificationWriter(this.deps),
 				});
 				this._baseToolDefinitions.set(askQuestionToolDefinition.name, askQuestionToolDefinition);
 			}

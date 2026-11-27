@@ -54,7 +54,7 @@ export async function verifyRangeJourney(
 	let rootRange = "";
 	world.provider.enqueue(
 		"root",
-		calls("range-root-call", [{ id: "range-root-zoom", name: "zoom", arguments: { id: 0, n: 9 } }]),
+		calls("range-root-call", [{ id: "range-root-zoom", name: "zoom", arguments: { id: "0", n: 9 } }]),
 		{
 			name: "range-root-reply",
 			check: (request) => {

@@ -512,6 +512,7 @@ const HOST_ONLY_WRITERS: ReadonlySet<string> = new Set([
 	"appendForegroundToolStarts",
 	"appendForegroundToolStart",
 	"appendForegroundToolTerminal",
+	"appendSteeredParentInput",
 	"skipPendingParentInput",
 	"recordParentNoteRequest",
 	"beginParentInputWake",

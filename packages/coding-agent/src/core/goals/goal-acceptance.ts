@@ -1,18 +1,37 @@
-import type { GoalEvidenceRef, GoalState, Requirement } from "./goal-state.ts";
-import { applyGoalEvent, isTrustedGoalEvidence } from "./goal-state.ts";
+import { hasCurrentCorrectedOutcomeProof } from "./goal-correction-proof.ts";
+import { applyGoalEvent, type GoalState, isGoalUnfinishedStatus } from "./goal-state.ts";
+import { getTrustedRequirementEvidence } from "./requirement-proof.ts";
 
-export function getTrustedRequirementEvidence(state: GoalState, requirement: Requirement): GoalEvidenceRef[] {
-	const evidenceIds = new Set(requirement.evidenceIds);
-	return state.evidence.filter((evidence) => evidenceIds.has(evidence.id) && isTrustedGoalEvidence(evidence));
+export {
+	currentRequirementCheckEvidence,
+	generalOutcomeCitations,
+	getOutcomeCitations,
+	getTrustedRequirementEvidence,
+	requirementKey,
+	requirementProofKey,
+} from "./requirement-proof.ts";
+
+/** Reopen each unfinished requirement whose acceptance lost its supporting proof. */
+export function reopenUnprovenRequirements(state: GoalState, now: string): GoalState {
+	if (!isGoalUnfinishedStatus(state.status)) return state;
+	let next = state;
+	for (const requirement of state.requirements) {
+		if (requirement.status === "satisfied" && getTrustedRequirementEvidence(state, requirement).length === 0)
+			next = applyGoalEvent(next, { type: "reopen_requirement", id: requirement.id, now });
+	}
+	return next;
 }
 
 export function getUnprovenGoalRequirementIds(state: GoalState): string[] {
-	return state.requirements
-		.filter(
-			(requirement) =>
-				requirement.status !== "satisfied" || getTrustedRequirementEvidence(state, requirement).length === 0,
-		)
-		.map((requirement) => requirement.id);
+	return [
+		...(!hasCurrentCorrectedOutcomeProof(state) ? ["corrected-outcome"] : []),
+		...state.requirements
+			.filter(
+				(requirement) =>
+					requirement.status !== "satisfied" || getTrustedRequirementEvidence(state, requirement).length === 0,
+			)
+			.map((requirement) => requirement.id),
+	];
 }
 
 const MAX_LEDGER_IDS_PER_CLASS = 20;

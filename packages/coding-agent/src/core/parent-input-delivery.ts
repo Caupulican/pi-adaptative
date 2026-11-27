@@ -10,7 +10,7 @@ import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type WorkerReceiptOrigin, workerReceiptOriginFromValue } from "./orchestration/worker-receipt-origin.ts";
-import { ParentInputSteerController, type SteeredMessage } from "./parent-input-steer.ts";
+import { ParentInputSteerController, type ParentInputSteerDeps } from "./parent-input-steer.ts";
 import type { RuntimeWorkLease } from "./runtime-generation-admission.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
 import { isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
@@ -68,7 +68,8 @@ export interface ParentInputDeliveryDeps {
 	onAccepted?(message: CustomMessage<unknown>, receipt: ParentInputReceipt): void;
 	holdLateWork(work: Promise<void>): void;
 	/** Queues a message for the running turn's next model step; absent, a steered input starts a turn like `turn`. */
-	steer?(message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">): SteeredMessage;
+	steer?: ParentInputSteerDeps["steer"];
+	commitRoutedMessages?(): void;
 }
 
 /** One canonical input, followed by a recoverable wake; never a second append to retry inference. */
@@ -109,6 +110,7 @@ export class ParentInputDeliveryController {
 					foreground,
 					getSessionManager: () => deps.getSessionManager(),
 					steer,
+					commitRoutedMessages: () => deps.commitRoutedMessages?.(),
 					deliverDurable: (input, options) => this.deliverLedger({ ...input, mode: "turn" }, options),
 					assertAcceptable: (manager, input) =>
 						assertOriginCurrent(manager, workerReceiptOriginFromValue(input.origin)),
@@ -391,16 +393,19 @@ export class ParentInputDeliveryController {
 			const agent = this.deps.getAgent();
 			agent.state.messages = manager.buildSessionContext().messages;
 			agent.resetSanitizerPrefixHorizon();
-			const opening = agent.state.messages.find(
-				(message) => manager.getMessageEntryId(message) === inputs[0]!.entryId,
+			const selected = new Set(inputs.map((input) => input.entryId));
+			const openings = agent.state.messages.filter((message) =>
+				selected.has(manager.getMessageEntryId(message) ?? ""),
 			);
-			if (opening?.role !== "custom") throw new Error("The first parent input is missing from canonical history.");
+			const opening = openings[0];
+			if (openings.length !== inputs.length || opening?.role !== "custom")
+				throw new Error("A parent input is missing from canonical history.");
 			if (!manager.getParentInputWake()?.completed) {
 				// Only the run answering this batch binds its provider requests to the wake.
 				// Post-turn corrections hold the submission but answer a new prompt of their own.
 				const deactivate = manager.activateParentInputWake(wake.wakeId);
 				try {
-					await this.foreground.runCommittedHistory(opening, lease, this.abort.signal);
+					await this.foreground.runCommittedHistory(openings, lease, this.abort.signal);
 				} finally {
 					deactivate();
 				}

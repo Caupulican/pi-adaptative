@@ -6,7 +6,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { ObjectiveRoute } from "../objective-execution/objective-route.ts";
-import type { AttemptRuntimeState } from "../orchestration/task-runtime-state.ts";
+import { type AttemptRuntimeState, attemptModelBinding } from "../orchestration/task-runtime-state.ts";
 import {
 	EXPERT_ROUTING_SCHEMA_VERSION,
 	type ExpertConsequence,
@@ -141,11 +141,12 @@ export function buildWorkerCapabilityRequest(input: BuildWorkerCapabilityRequest
 			}
 			// If independence is required, also exclude models/providers from prior attempts
 			if (input.decisionSignals?.independentWorkerRequired || workClass === "verify" || workClass === "review") {
-				const modelId = (attempt as { modelId?: string }).modelId;
-				const provider = (attempt as { provider?: string }).provider;
-				if (modelId && !excludedModelRefs.includes(modelId)) {
-					excludedModelRefs.push(modelId);
+				const model = "dispatch" in attempt ? attemptModelBinding(attempt) : attempt;
+				const modelRef = model?.provider && model.modelId ? `${model.provider}/${model.modelId}` : model?.modelId;
+				if (modelRef && !excludedModelRefs.includes(modelRef)) {
+					excludedModelRefs.push(modelRef);
 				}
+				const provider = model?.provider;
 				if (independenceLevel === "distinct_provider" && provider && !excludedProviders.includes(provider)) {
 					excludedProviders.push(provider);
 				}

@@ -4,7 +4,11 @@ import { messageHistoryVersion } from "../kernel/message-revision.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
 import { VersionedMessageFilter } from "../kernel/prefix-fold.ts";
 import { isContextPlanDispatchCurrent } from "../kernel/provider-request-planner.ts";
-import { parentInputMetadataOfMessage, parentNoteMarker } from "../kernel/session/parent-input-ledger.ts";
+import {
+	hiddenParentInputIds,
+	parentInputMetadataOfMessage,
+	parentNoteMarker,
+} from "../kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 
 /**
@@ -29,7 +33,11 @@ export function projectParentInputs(
 	base: AgentContextPlanFn,
 	manager: Pick<
 		SessionManager,
-		"captureParentNotes" | "getPendingParentInputs" | "getActiveParentInputWake" | "getSkippedParentInputIds"
+		| "captureParentNotes"
+		| "getPendingParentInputs"
+		| "getActiveParentInputWake"
+		| "getSkippedParentInputIds"
+		| "getMessageEntryId"
 	>,
 	getSubmissionEpoch: () => number | undefined,
 ): AgentContextPlanFn {
@@ -40,12 +48,10 @@ export function projectParentInputs(
 	let outputFilter = createFilter(hidden);
 	return async (request, signal) => {
 		const epoch = getSubmissionEpoch();
-		const selection = manager.captureParentNotes(request.messages, epoch);
+		const wake = manager.getActiveParentInputWake();
 		const pending = new Set(manager.getPendingParentInputs().map((input) => input.metadata.deliveryId));
 		const skipped = new Set(manager.getSkippedParentInputIds());
-		const wake = manager.getActiveParentInputWake();
-		const hiddenIds = new Set([...pending, ...skipped]);
-		for (const input of wake?.inputs ?? []) hiddenIds.delete(input.deliveryId);
+		const hiddenIds = hiddenParentInputIds(pending, skipped, wake);
 		if (!matchesIds(hidden, hiddenIds)) {
 			hidden = hiddenIds;
 			inputFilter = createFilter(hidden);
@@ -66,9 +72,18 @@ export function projectParentInputs(
 			);
 		};
 		const keep = (message: AgentMessage) => !hiddenParentInput(message, hiddenIds);
+		const window = wake?.window;
+		const keepInput = window
+			? (message: AgentMessage): boolean => {
+					const entryId = manager.getMessageEntryId(request.sourceMessage?.(message) ?? message);
+					return (entryId === undefined || window.admitsPriorEntry(entryId)) && keep(message);
+				}
+			: keep;
 		const filter = (messages: AgentMessage[], projection: VersionedMessageFilter): AgentMessage[] =>
 			hiddenIds.size === 0 && messageHistoryVersion(messages) ? messages : projection.filter(messages);
-		const messages = filter(request.messages, inputs);
+		const messages = window ? request.messages.filter(keepInput) : filter(request.messages, inputs);
+		// An owner can steer into this wake after it starts. Only the admitted window may select their held notes.
+		const selection = manager.captureParentNotes(messages, epoch);
 		const sourceLength = request.messages.length;
 		const sourcePrefix = Math.min(sourceLength, request.sentPrefixCount);
 		let sentPrefixCount = sourcePrefix;
@@ -79,7 +94,7 @@ export function projectParentInputs(
 			const end = countPrefix ? sourcePrefix : sourceLength;
 			for (let index = countPrefix ? 0 : sourcePrefix; index < end; index++) {
 				const message = request.messages[index];
-				if (message && keep(message)) kept++;
+				if (message && keepInput(message)) kept++;
 			}
 			if (countPrefix) countHistoryWork(request.messages, "oldRowsRead", sourcePrefix);
 			sentPrefixCount = countPrefix ? kept : messages.length - kept;
@@ -96,7 +111,7 @@ export function projectParentInputs(
 								messages:
 									hiddenIds.size === 0 && messages === request.messages
 										? request.wire.messages
-										: request.wire.messages?.filter(keep),
+										: request.wire.messages?.filter(keepInput),
 							},
 						}
 					: {}),
@@ -106,8 +121,7 @@ export function projectParentInputs(
 		const projected = filter(plan.messages, outputs);
 		const transientMessages = plan.transientMessages?.filter(keep);
 		const history = plan.providerHistory;
-		// A failed wake can outlive an unrelated owner turn. Retry from the complete history with the
-		// same manifest as a request-local user turn, without re-appending the input or replaying a tool.
+		// A saved assistant exchange can end the detached window. Reopen the same manifest for the request only.
 		const tail = wake && projected.findLast((row) => row.role !== "bashExecution" || !row.excludeFromContext);
 		const resumeWake = wake && tail?.role === "assistant";
 		const requestMessages = selection
@@ -138,7 +152,7 @@ export function projectParentInputs(
 			...plan,
 			...(transientMessages ? { transientMessages } : {}),
 			// A selection is request-local authority. Admitting this request starts a fresh history window.
-			...((selection || resumeWake) && history
+			...((selection || wake) && history
 				? {
 						providerHistory: {
 							...history,
@@ -153,6 +167,7 @@ export function projectParentInputs(
 				isDispatchCurrent: () =>
 					getSubmissionEpoch() === epoch &&
 					manager.getActiveParentInputWake()?.wakeId === wake.wakeId &&
+					(!selection || selection.isCurrent()) &&
 					isContextPlanDispatchCurrent(plan),
 			}),
 			prepareCommit: () => isCurrent() && plan.prepareCommit?.() !== false,

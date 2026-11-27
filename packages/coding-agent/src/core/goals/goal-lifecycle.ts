@@ -1,5 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import type { GoalOwnerCorrection, GoalSourcePosition } from "./goal-correction-contract.ts";
+import { goalOwnerActivationAt } from "./goal-owner-activation.ts";
 import { type GoalRefusalAction, type RefusedGoalAction, refuseGoalAction } from "./goal-refusal.ts";
 import {
 	applyGoalEvent,
@@ -16,12 +18,23 @@ import {
 import { applyGoalAction, type GoalActionFailure, type GoalActionResult } from "./goal-tool-core.ts";
 
 export interface GoalStateRevision {
+	/** Exact read snapshot supplied by the in-process writer, including which branch state it observed. */
+	readonly basis?: GoalState;
 	goalId: string;
 	revision: number;
 }
 
 export function getGoalStateRevision(state: GoalState): GoalStateRevision {
-	return { goalId: state.goalId, revision: state.revision ?? 0 };
+	return { goalId: state.goalId, revision: state.revision ?? 0, basis: state };
+}
+
+export function matchesGoalStateRevision(current: GoalState | undefined, expected: GoalStateRevision): boolean {
+	return (
+		current !== undefined &&
+		current.goalId === expected.goalId &&
+		(current.revision ?? 0) === expected.revision &&
+		(!expected.basis || expected.basis === current || isDeepStrictEqual(expected.basis, current))
+	);
 }
 
 /**
@@ -190,6 +203,13 @@ function isAutomaticRecoveryAllowed(current: GoalState, prefix: string): boolean
 /** Minimal durable seam shared by CLI, tools, and in-process session restoration. */
 export interface PersistedGoalStateHost {
 	getGoalStateSnapshot(): GoalState | undefined;
+	goalSourcePosition?(goal: GoalState): GoalSourcePosition | undefined;
+	recordGoalOwnerCorrection?(
+		goal: GoalState,
+		objective: string,
+		now: string,
+		expectedEntryId?: string,
+	): GoalOwnerCorrection;
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
 	clearGoalStateSnapshot?(state: GoalState, now: string): string;
 }
@@ -233,11 +253,10 @@ export function resumeGoal(current: GoalState | undefined, now: string, source?:
 	return { ok: true, state: applyGoalEvent(current, { type: "resume_goal", now, ...(source ? { source } : {}) }) };
 }
 
-export function editGoal(
+function validateGoalEdit(
 	current: GoalState | undefined,
 	args: { userGoal: string; tokenBudget?: number },
-	now: string,
-): GoalActionResult {
+): RefusedGoalAction | undefined {
 	if (!current) return missingGoal("edit");
 	if (current.status === "cancelled") {
 		harnessLog.debug("ui", "a goal edit was refused: the goal is cancelled", { goalId: current.goalId });
@@ -251,9 +270,25 @@ export function editGoal(
 	if (args.tokenBudget !== undefined && (!Number.isSafeInteger(args.tokenBudget) || args.tokenBudget <= 0)) {
 		return refuseGoalAction({ kind: "edit_token_budget_invalid" });
 	}
+	return undefined;
+}
+
+export function editGoal(
+	current: GoalState | undefined,
+	args: { userGoal: string; tokenBudget?: number },
+	now: string,
+): GoalActionResult {
+	const invalid = validateGoalEdit(current, args);
+	if (invalid) return invalid;
+	if (current!.status === "completed") throw new Error("Completed goal edits require a recorded owner correction.");
 	return {
 		ok: true,
-		state: applyGoalEvent(current, { type: "edit_goal", userGoal, tokenBudget: args.tokenBudget, now }),
+		state: applyGoalEvent(current!, {
+			type: "edit_goal",
+			userGoal: args.userGoal.trim(),
+			tokenBudget: args.tokenBudget,
+			now,
+		}),
 	};
 }
 
@@ -347,15 +382,8 @@ export function holdPersistedGoalForOwnerStop(
  * resume, or the goal's own progress, after it is not the owner's word and leaves the stop to hold it.
  */
 function goalSetGoingSince(state: GoalState, at: number): boolean {
-	const after = (iso: string) => Date.parse(iso) > at;
-	return (
-		after(state.createdAt) ||
-		state.events.some(
-			(event) =>
-				(event.type === "edit_goal" || (event.type === "resume_goal" && event.source !== "system")) &&
-				after(event.now),
-		)
-	);
+	const activatedAt = goalOwnerActivationAt(state);
+	return activatedAt !== undefined && Date.parse(activatedAt) > at;
 }
 
 export function resumePersistedGoal(host: PersistedGoalStateHost, now = new Date().toISOString()): GoalActionResult {
@@ -365,11 +393,28 @@ export function resumePersistedGoal(host: PersistedGoalStateHost, now = new Date
 
 export function editPersistedGoal(
 	host: PersistedGoalStateHost,
-	args: { userGoal: string; tokenBudget?: number },
+	args: { userGoal: string; tokenBudget?: number; expected?: GoalStateRevision; expectedEntryId?: string },
 	now = new Date().toISOString(),
 ): GoalActionResult {
 	const current = host.getGoalStateSnapshot();
-	return persistResult(host, current, editGoal(current, args, now));
+	if (args.expected && !matchesGoalStateRevision(current, args.expected))
+		throw new Error("Goal state changed; retry the edit against the current goal.");
+	if (args.expectedEntryId && (!current || host.goalSourcePosition?.(current)?.goalEntryId !== args.expectedEntryId))
+		throw new Error("Goal branch changed; retry the edit against the current goal.");
+	const invalid = validateGoalEdit(current, args);
+	if (invalid) return invalid;
+	if (current?.status !== "completed") return persistResult(host, current, editGoal(current, args, now));
+	if (!host.recordGoalOwnerCorrection) throw new Error("This host cannot record an explicit owner correction.");
+	const correction = host.recordGoalOwnerCorrection(current, args.userGoal.trim(), now, args.expectedEntryId);
+	return persistResult(host, current, {
+		ok: true,
+		state: applyGoalEvent(current, {
+			type: "correct_completed_goal",
+			correction,
+			tokenBudget: args.tokenBudget,
+			now,
+		}),
+	});
 }
 
 export function cancelPersistedGoal(host: PersistedGoalStateHost, now = new Date().toISOString()): GoalActionResult {

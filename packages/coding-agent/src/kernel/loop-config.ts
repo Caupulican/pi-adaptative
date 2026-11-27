@@ -22,6 +22,7 @@ import type {
 	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
+	CommittedToolReport,
 	ThinkingLevel,
 	ToolExecutionMode,
 } from "./types.ts";
@@ -634,6 +635,8 @@ export interface FollowUpState {
 
 export interface AgentLoopConfig extends AgentStreamOptions {
 	model: Model<any>;
+	/** Admit host-owned queued inputs before they can enter working history or reach a provider. */
+	admitQueuedInput?: (message: AgentMessage, signal?: AbortSignal) => boolean | Promise<boolean>;
 	resolveResponseMode?: (context: AgentContext) => "answer_only" | "default" | undefined;
 
 	/**
@@ -1091,6 +1094,8 @@ export interface AgentContext {
 	 * loop made on purpose from one nobody sanctioned.
 	 */
 	surfaceChange?: string;
+	/** Execution-only custody and the exact transcript result for this one tool-free report. */
+	committedToolReport?: CommittedToolReport & { readonly receipt: ToolResultMessage };
 	/**
 	 * The request's literal tail is a host-authored instruction the model must act on (a halt message
 	 * asking for its own report). The planner then appends no trailing MUST-protocol record (the

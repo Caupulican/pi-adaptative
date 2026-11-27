@@ -85,7 +85,7 @@ const everyMsField = Type.Optional(
 );
 
 /** The authored condition's shapes in the model's words, for the descriptions of the tools that arm a watch. */
-export const WATCH_CONDITION_SHAPES = `{type:'file', path (a file, a folder or a glob), on:'changed'|'created'|'deleted'}, {type:'process', processId, on:'exited'} (a process-matrix ID such as worker-<session id>, not tool-task-N), {type:'pid', pid, on:'exited', everyMs?}, {type:'port', host, port, on:'open'|'closed', everyMs?}, {type:'command', command, everyMs?, timeoutMs?, expect?:{exitCode?, outputContains?}} (admitted like the owner's own shell calls) or {type:'http', url, statusIs?, bodyContains?, everyMs?} (GET only); timed checks run every ${WATCH_DEFAULT_EVERY_MS / 1_000} s unless everyMs (at least ${WATCH_MIN_EVERY_MS / 1_000} s) says otherwise`;
+export const WATCH_CONDITION_SHAPES = `{type:'file', path (a file, a folder or a glob), on:'changed'|'created'|'deleted'}, {type:'process', processId, on:'exited'} (a process-matrix ID such as worker-<session id>, not tool-task-N), {type:'pid', pid, on:'exited', everyMs?}, {type:'port', host, port, on:'open'|'closed', everyMs?}, {type:'command', command, everyMs?, timeoutMs?, expect?:{exitCode?, outputContains?}} (admitted like the owner's own shell calls) or {type:'http', url, statusIs?, bodyContains?, everyMs?} (GET only). Put everyMs and timeoutMs as JSON integers and expect as a JSON object inside the condition. Timed checks run every ${WATCH_DEFAULT_EVERY_MS / 1_000} s unless everyMs (at least ${WATCH_MIN_EVERY_MS / 1_000} s) says otherwise`;
 
 /** The authored condition: a discriminated union on `type`. */
 export const watchConditionSchema = Type.Union([

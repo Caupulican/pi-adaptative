@@ -1,4 +1,5 @@
 /** Selects the input that owns a request, builds tool-free contexts, and deduplicates closing instructions. */
+import type { ProviderResponseObserver, ProviderResponseTicket } from "@caupulican/pi-ai";
 import { countHistoryWork } from "@caupulican/pi-ai/history-work";
 import type { AgentContext, AgentHaltRequest, AgentLoopConfig } from "./loop-config.ts";
 import { serializedMessagesEqual } from "./message-revision.ts";
@@ -18,13 +19,24 @@ export interface HaltReport {
 	systemDirective?: string;
 }
 
+export type PublishedToolReport = NonNullable<AgentContext["committedToolReport"]>;
+export type ClosingReport = HaltReport | PublishedToolReport;
+
 export function closingRequestContext(
 	context: AgentContext,
-	halt?: HaltReport,
+	report?: ClosingReport,
 	obligations?: VerificationObligationTracker,
 ): AgentContext {
 	// The worker control row already contains the complete reporting instruction. Keep the
 	// request prefix intact. The loop enforces the execution boundary on the returned response.
+	if (report && "kind" in report) {
+		return {
+			...toolFreeRequestContext(context, "the committed result requests a tool-free report"),
+			committedToolReport: report,
+			trailingInstruction: obligations?.requestInstruction(),
+		};
+	}
+	const halt = report;
 	if (halt && halt.systemDirective === undefined) return { ...context, instructionTail: halt.instruction };
 	const directive = halt?.systemDirective ?? RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT;
 	return {
@@ -32,6 +44,28 @@ export function closingRequestContext(
 		systemPrompt: context.systemPrompt ? `${context.systemPrompt}\n\n${directive}` : directive,
 		trailingInstruction: obligations?.requestInstruction(),
 		...(halt ? { instructionTail: halt.instruction } : {}),
+	};
+}
+
+const unobservedResponse: ProviderResponseTicket = { complete() {}, failed() {} };
+
+/** Combine one exclusive report dispatch with the existing transport accounting ticket. */
+export function reportDispatchObserver(
+	beginDispatch: () => void,
+	parent?: ProviderResponseObserver,
+): ProviderResponseObserver {
+	return {
+		begin(model, signal) {
+			const ticket = parent?.begin(model, signal) ?? unobservedResponse;
+			try {
+				signal?.throwIfAborted();
+				beginDispatch();
+				return ticket;
+			} catch (error) {
+				ticket.failed(error);
+				throw error;
+			}
+		},
 	};
 }
 
@@ -124,8 +158,14 @@ export function requestContextForOpening(
 		state.requestOpening,
 	);
 	return {
-		...context,
+		...snapshotRequestContext(context, config),
 		requestOpening: state.requestOpening,
+	};
+}
+
+export function snapshotRequestContext(context: AgentContext, config: AgentLoopConfig): AgentContext {
+	return {
+		...context,
 		messages: config.workingHistory?.refresh(context.messages) ?? context.messages.slice(),
 	};
 }

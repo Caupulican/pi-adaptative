@@ -22,16 +22,12 @@ import { DurableHumanEdgeLedger, type HumanEdgeRequest, requiresHumanEdge } from
 import { resolveEffectiveCompletionProfile } from "../decision/completion-profile.ts";
 import { settledAnswer } from "../decision/noul.ts";
 import type { CompletionAssuranceProfile } from "../decision/policy.ts";
-import type { ResponsibilityStatement, SemanticResponsibilityController } from "../dedup/index.ts";
-import type {
-	ExpertBinding,
-	ExpertOutcomeRecorder,
-	ExpertSelectionResult,
-	ExpertSelectionService,
-} from "../expert-routing/index.ts";
-import { buildWorkerCapabilityRequest, NoEligibleExpertError } from "../expert-routing/index.ts";
+import type { SemanticResponsibilityController } from "../dedup/index.ts";
+import type { ExpertBinding, ExpertOutcomeRecorder, ExpertSelectionService } from "../expert-routing/index.ts";
+import { buildWorkerCapabilityRequest } from "../expert-routing/index.ts";
 import { describeRequirementCheckRefusal, type RequirementCheckProof } from "../goals/prove-requirement-checks.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
+import { objectiveNeedsCorrectedOutcome } from "../orchestration/objective-criteria.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { blocksRuleTransition } from "../project-rules/types.ts";
 import {
@@ -53,7 +49,7 @@ import {
 	type SystemOneControlDirective,
 	sameLaneVerificationDirective,
 } from "../system-one/control-directive.ts";
-import type { TerminalCompletionProof } from "../system-one/controller.ts";
+import type { TerminalCompletionOptions, TerminalCompletionProof } from "../system-one/controller.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
 import type { ExecutionState } from "../system-one/types.ts";
 import {
@@ -61,6 +57,7 @@ import {
 	type CompletionEvaluationContext,
 	type IndependentReviewerVerdict,
 } from "./completion-coordinator.ts";
+import { objectiveExecutionSignal } from "./current-objective-execution.ts";
 import {
 	buildDeliveryBundle,
 	type DeliveryArtifact,
@@ -77,17 +74,29 @@ import {
 } from "./delivery-coordinator.ts";
 import { type ApprovedCandidateTree, candidateTreeDigest } from "./delivery-proof.ts";
 import { finalizeDelivery } from "./finalization-coordinator.ts";
-import { evidenceMarkerOf } from "./ledger-route-checkpoints.ts";
+import { evaluateRouteHistory, LocalRouteHistory } from "./ledger-route-checkpoints.ts";
 import { applyLocalCommitCharter } from "./local-commit-delivery.ts";
 import { objectiveJoinAttempts } from "./objective-readiness.ts";
 import { completionFailuresToRepairWork, type RepairWork } from "./objective-repair-work.ts";
 import {
 	type ObjectiveRoute,
+	type ObjectiveRouteExecutor,
 	type ObjectiveRouteName,
 	type ObjectiveTerminalResult,
+	PENDING_WORKER_EXECUTOR,
+	type RetrievalDisposition,
 	routeToTerminal,
 	validateObjectiveRoute,
+	type WorkerRouteAdmission,
 } from "./objective-route.ts";
+import {
+	dispatchObjectiveRoute,
+	executeObjectiveRetrieval,
+	executeObjectiveSpecialist,
+	executeObjectiveWorker,
+	executeWithRouteAdmission,
+	runAdmittedRoute,
+} from "./objective-route-execution.ts";
 import {
 	composeObjectiveRoute,
 	INDEPENDENT_VERIFICATION_REASON_CODE,
@@ -98,7 +107,7 @@ import {
 	type RouteHistoryEntry,
 	type SemanticRouteJudgments,
 } from "./objective-route-projector.ts";
-import { ObjectiveStallDetector, type StallEvaluation } from "./objective-stall-fingerprint.ts";
+import { evidenceMarkerOf, type StallEvaluation } from "./objective-stall-fingerprint.ts";
 import { judgeTransition } from "./transition-judgment.ts";
 
 export type ExecutionLoopMode = "legacy_goal" | "objective_shadow" | "objective_primary" | "start_only" | "interactive";
@@ -115,9 +124,25 @@ type RouteAcknowledgment =
 	| { readonly kind: "supervision"; readonly signalId: string }
 	| { readonly kind: "system_one"; readonly directive: SystemOneControlDirective };
 
+type ObjectiveWorkerDispatch = (
+	route: ObjectiveRoute,
+	signal?: AbortSignal,
+	binding?: ExpertBinding,
+	onStarted?: () => void,
+) => Promise<WorkerRouteAdmission> | Promise<void>;
+
 export interface ObjectiveExecutionControllerDeps {
+	executionSignal?(objectiveId: string, activeOnly?: boolean): AbortSignal | undefined;
+	reviewCorrectedOutcome?(objectiveId: string, signal?: AbortSignal): Promise<void>;
+	prepareGoalCompletion?(objectiveId: string): { key: string; refusal?: string; assertCurrent(): void } | undefined;
 	runtime: {
+		getEvidenceRevision?(objectiveId: string): number | Promise<number>;
 		reconcileObjective(objectiveId: string): Promise<TaskRuntimeProjection>;
+		recordExecutorRefusal?(
+			objectiveId: string,
+			route: ObjectiveRoute,
+			reasons: readonly string[],
+		): ObjectiveTerminalResult | undefined;
 		/** Session adapters fence superseded goal routes without changing historical objective state. */
 		assertExecutionCurrent?(objectiveId: string): void;
 		ensureRepairTasks?(objectiveId: string, repairs: readonly RepairWork[]): Promise<void>;
@@ -138,9 +163,10 @@ export interface ObjectiveExecutionControllerDeps {
 			isBugFix: boolean,
 			options?: { signal?: AbortSignal; persistTerminal?: boolean },
 		): Promise<FinalCompletionVerdict>;
-		commitTerminalCompletion?(input: TerminalCompletionProof, options?: { signal?: AbortSignal }): Promise<void>;
+		commitTerminalCompletion?(input: TerminalCompletionProof, options?: TerminalCompletionOptions): Promise<void>;
 		validateObjectivePostflight?(objectiveId: string): Promise<void>;
 		recordHostEvidence?(evidence: unknown): Promise<void>;
+		syncOwnerCorrection?(entryId: string): void;
 		peekControlDirective?(): SystemOneControlDirective | undefined;
 		/** With `expected`, clears only the still-current directive represented by the executed route. */
 		consumeControlDirective?(expected?: SystemOneControlDirective): SystemOneControlDirective | undefined;
@@ -158,6 +184,7 @@ export interface ObjectiveExecutionControllerDeps {
 		}): Promise<IndependentReviewerVerdict> | IndependentReviewerVerdict;
 	};
 	evidence?: {
+		getEvidenceRevision?(objectiveId: string): number | Promise<number>;
 		reconcile?(objectiveId: string): Promise<void>;
 		ingestLatest?(objectiveId: string): Promise<void>;
 	};
@@ -176,17 +203,23 @@ export interface ObjectiveExecutionControllerDeps {
 	};
 	retrieval?: {
 		/** Resolves with who gathered (the root or workers), recorded as the route's executor. */
-		execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<"root" | "worker" | undefined>;
+		reportsAdmission?: boolean;
+		execute(
+			route: ObjectiveRoute,
+			signal?: AbortSignal,
+			submitted?: (executor: "worker" | "root") => void,
+		): Promise<RetrievalDisposition | undefined>;
 	};
-	verifier?: {
-		execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void>;
-	};
+	verifier?: ObjectiveRouteExecutor;
 	workerDispatcher?: {
-		dispatch(route: ObjectiveRoute, signal?: AbortSignal, binding?: ExpertBinding): Promise<void>;
-		continueWorker(route: ObjectiveRoute, signal?: AbortSignal, binding?: ExpertBinding): Promise<void>;
-		dispatchEscalated(route: ObjectiveRoute, signal?: AbortSignal, binding?: ExpertBinding): Promise<void>;
+		dispatch: ObjectiveWorkerDispatch;
+		continueWorker: ObjectiveWorkerDispatch;
+		dispatchEscalated: ObjectiveWorkerDispatch;
+		readonly ownsSpecialistAttempts?: boolean;
 		dispatchSpecialist?(input: {
 			objectiveId: string;
+			route: ObjectiveRoute;
+			onStarted?: () => void;
 			specialist: MaterializedSpecialist;
 			taskId: string;
 			attemptId?: string;
@@ -194,7 +227,7 @@ export interface ObjectiveExecutionControllerDeps {
 			fencingToken?: number;
 			expiresAt?: string;
 			signal?: AbortSignal;
-		}): Promise<WorkerResultContract>;
+		}): Promise<WorkerResultContract | WorkerRouteAdmission>;
 	};
 	expertSelector?: ExpertSelectionService;
 	outcomeRecorder?: ExpertOutcomeRecorder;
@@ -203,14 +236,13 @@ export interface ObjectiveExecutionControllerDeps {
 	 * routes System One does not hand to an independent worker (implement, investigate, replan,
 	 * retrieval and non-independent verification); review and escalations stay with workers.
 	 */
-	rootExecutor?: {
-		execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void>;
-	};
+	rootExecutor?: ObjectiveRouteExecutor;
 	/**
 	 * Who executes a route the root may take: the root (the talker, on its warm cache) or a worker given
 	 * the route's brief, by what each costs (`priceExecutor`). Absent, the root takes it.
 	 */
 	chooseExecutor?(route: ObjectiveRoute): "root" | "worker";
+	runnableRequirements?(objectiveId: string): readonly string[] | undefined;
 	/** The owner's authority is what the objective waits on right now: an open question or an operator blocker. */
 	ownerRequired?(objectiveId: string): boolean;
 	/** Unconsumed specialist/capability/verifier requests from live worker supervision. */
@@ -239,7 +271,10 @@ export interface ObjectiveExecutionControllerDeps {
 	 * Rerun the goal's requirement checks and record their results (goals/prove-requirement-checks.ts),
 	 * the same proof the goal tool's completion takes. Undefined when there is no goal.
 	 */
-	proveRequirementChecks?(signal?: AbortSignal): Promise<RequirementCheckProof | undefined>;
+	proveRequirementChecks?(
+		signal: AbortSignal | undefined,
+		objectiveId: string,
+	): Promise<RequirementCheckProof | undefined>;
 	ownedPathDigests?(): readonly { readonly path: string; readonly digest: string }[];
 	gitExecutor?: DeliveryGitExecutor;
 	releaseExecutor?: DeliveryReleaseExecutor;
@@ -323,11 +358,11 @@ async function captureOptionalSnapshot(repoRoot: string | undefined): Promise<Ca
 
 export class ObjectiveExecutionController {
 	private readonly deps: ObjectiveExecutionControllerDeps;
-	private readonly defaultStallDetector: ObjectiveStallDetector;
+	private readonly localRoutes = new LocalRouteHistory();
 	private readonly humanEdgeLedger: DurableHumanEdgeLedger;
 	private readonly authorityBlockLedger: DurableAuthorityBlockLedger;
 	private readonly attemptBindings = new Map<string, { binding: ExpertBinding; route: ObjectiveRoute }>();
-	private readonly admittedObjectives = new Set<string>();
+	private readonly admittedObjectives = new Map<string, AbortSignal | undefined>();
 	private readonly admissionCerts = new Map<string, string[]>();
 	private readonly alternativesTried = new Set<string>();
 	private readonly routeAcknowledgments = new WeakMap<ObjectiveRoute, RouteAcknowledgment>();
@@ -337,23 +372,23 @@ export class ObjectiveExecutionController {
 	private cycleCounter = 0;
 	private _lastBinding?: ExpertBinding;
 	private _lastRoute?: ObjectiveRoute;
-	private _lastExecutor?: string;
+	private readonly executors = new WeakMap<ObjectiveRoute, string>();
 
-	private assertExecutionCurrent(objectiveId: string): void {
+	private assertExecutionCurrent(objectiveId: string, signal?: AbortSignal): void {
+		signal?.throwIfAborted();
 		this.deps.runtime.assertExecutionCurrent?.(objectiveId);
 	}
 
-	/**
-	 * Record who executes a route the moment it is decided, before the route runs: how many requests a
-	 * route of this kind takes on the root is learned from the decision to the next one, whatever the
-	 * route's outcome, so a route that fails or is interrupted still counts.
-	 */
 	private nextCycleId(): string {
 		return `cycle_${++this.cycleCounter}_${randomUUID().slice(0, 8)}`;
 	}
 
-	private async _noteExecutor(route: ObjectiveRoute, executor: string): Promise<void> {
-		this._lastExecutor = executor;
+	private async _noteExecutor(route: ObjectiveRoute, runtime: TaskRuntimeProjection, executor: string): Promise<void> {
+		const prior = this.executors.get(route);
+		if (prior === executor || (prior !== undefined && executor === PENDING_WORKER_EXECUTOR)) return;
+		this.executors.set(route, executor);
+		if (executor === PENDING_WORKER_EXECUTOR) return;
+		if (!this.deps.checkpoints?.recentRoutes) this.localRoutes.record(route, runtime, executor);
 		await this.deps.checkpoints?.recordRouteOutcome?.(route, executor);
 	}
 
@@ -387,6 +422,7 @@ export class ObjectiveExecutionController {
 			.update(
 				JSON.stringify({
 					objective: objective?.objective.description,
+					ownerCorrection: objective?.goalSource?.lastCorrection?.ownerEntryId,
 					evidence: objective?.evidence,
 					findings: this.deps.systemOne?.peekControlDirective?.()?.reasonCodes,
 					// Canonical hydration stamps observations with the projection revision and open
@@ -426,7 +462,11 @@ export class ObjectiveExecutionController {
 			Pick<
 				ObjectiveExecutionControllerDeps,
 				| "rootExecutor"
+				| "executionSignal"
+				| "prepareGoalCompletion"
+				| "reviewCorrectedOutcome"
 				| "chooseExecutor"
+				| "runnableRequirements"
 				| "waiter"
 				| "retrieval"
 				| "verifier"
@@ -462,7 +502,6 @@ export class ObjectiveExecutionController {
 	constructor(deps: ObjectiveExecutionControllerDeps) {
 		this.deps = deps;
 		this.ownerBlockerSink = deps.onOwnerBlocker;
-		this.defaultStallDetector = new ObjectiveStallDetector();
 		this.humanEdgeLedger = deps.humanEdgeLedger ?? new DurableHumanEdgeLedger();
 		this.authorityBlockLedger = deps.authorityBlockLedger ?? new DurableAuthorityBlockLedger();
 		if (this.getMode() === "start_only" && !deps.executionCharter) {
@@ -492,14 +531,15 @@ export class ObjectiveExecutionController {
 		input?: Record<string, unknown>;
 		signal?: AbortSignal;
 	}): Promise<{ action: string; executed: boolean; result?: unknown }> {
-		const { objectiveId, action = "escalate_capability", input, signal } = options;
+		const { objectiveId, action = "escalate_capability", input } = options;
+		const signal = objectiveExecutionSignal(this.deps, objectiveId, options.signal, true);
 		signal?.throwIfAborted();
 		this.assertExecutionCurrent(objectiveId);
 
 		if (action === "escalate_capability") {
 			const route: ObjectiveRoute = {
 				schema_version: "1.0",
-				cycle_id: `cycle-${objectiveId}`,
+				cycle_id: this.nextCycleId(),
 				objective_id: objectiveId,
 				route: "escalate_capability",
 				reason_codes: ["explicit_step"],
@@ -535,6 +575,8 @@ export class ObjectiveExecutionController {
 					signal,
 				});
 
+				this.assertExecutionCurrent(objectiveId, signal);
+				await this.deps.checkpoints?.recordRoute?.(route);
 				const taskRunner = (rawRuntime?.createTask ? rawRuntime : runtime) as any;
 				const snapshot = taskRunner?.getSnapshot?.();
 				if (snapshot && !snapshot.objectives?.[objectiveId]) {
@@ -556,7 +598,7 @@ export class ObjectiveExecutionController {
 
 				return {
 					action,
-					executed: true,
+					executed: this.executors.get(route) !== PENDING_WORKER_EXECUTOR,
 					result: workerResult,
 				};
 			}
@@ -568,14 +610,19 @@ export class ObjectiveExecutionController {
 		};
 	}
 
+	private async recentRouteHistory(objectiveId: string): Promise<readonly RouteHistoryEntry[]> {
+		return this.deps.checkpoints?.recentRoutes?.(objectiveId, 8) ?? this.localRoutes.recent(objectiveId, 8);
+	}
+
 	async evaluateRouteOnce(
 		objectiveId: string,
 		options?: { signal?: AbortSignal; legacyActionHint?: string },
 	): Promise<ObjectiveRoute> {
+		const signal = objectiveExecutionSignal(this.deps, objectiveId, options?.signal);
 		const routeSnapshot = await captureOptionalSnapshot(this.deps.repoRoot);
 		const initialDigest = routeSnapshot?.digest ?? "unknown";
-		options?.signal?.throwIfAborted();
-		this.assertExecutionCurrent(objectiveId);
+		signal?.throwIfAborted();
+		this.assertExecutionCurrent(objectiveId, signal);
 		const cycleId = this.nextCycleId();
 
 		const runtime = await this.deps.runtime.reconcileObjective(objectiveId);
@@ -583,23 +630,15 @@ export class ObjectiveExecutionController {
 		// Reconcile evidence
 		await this.deps.evidence?.reconcile?.(objectiveId);
 
-		// Evaluate stall
-		let stall: StallEvaluation = {
-			stalled: false,
-			stallTurns: 0,
-			repeatedWithoutNewEvidence: false,
-			fingerprint: "init",
-		};
-		if (this.deps.stalls) {
-			stall = await this.deps.stalls.evaluate(objectiveId);
-		}
-
-		// The ledger's recent routes are part of what the judge sees: repetition is a fact, not a hunch.
-		const history = (await this.deps.checkpoints?.recentRoutes?.(objectiveId, 6)) ?? [];
+		const history = await this.recentRouteHistory(objectiveId);
+		const judgedMarker = evidenceMarkerOf(runtime, objectiveId);
+		const stall = (await this.deps.stalls?.evaluate(objectiveId)) ?? evaluateRouteHistory(history, judgedMarker);
 
 		// Evaluate semantic route via SteeringPlane JEV-004 (PH-113: JEV-004 route owner)
 		let semantic: SemanticRouteJudgments = {};
 		let routeCertificateId: string | undefined;
+		const correction = runtime.objectives[objectiveId]?.goalSource?.lastCorrection;
+		if (correction) this.deps.systemOne?.syncOwnerCorrection?.(correction.ownerEntryId);
 		const verificationPending = isSameLaneVerificationDirective(this.deps.systemOne?.peekControlDirective?.());
 
 		if (!verificationPending && this.deps.steeringPlane) {
@@ -616,7 +655,7 @@ export class ObjectiveExecutionController {
 				);
 				const cert = await this.deps.steeringPlane.requireCertificate("JEV-004", stateProjection, {
 					objectiveId,
-					signal: options?.signal,
+					signal,
 				});
 
 				routeCertificateId = cert.certificate_id;
@@ -649,7 +688,7 @@ export class ObjectiveExecutionController {
 			}
 		} else if (!verificationPending && this.deps.systemOne?.evaluateObjectiveRoute) {
 			try {
-				semantic = await this.deps.systemOne.evaluateObjectiveRoute(objectiveId, { signal: options?.signal });
+				semantic = await this.deps.systemOne.evaluateObjectiveRoute(objectiveId, { signal });
 			} catch (err) {
 				this.throwIfRequiredSemantic(err);
 			}
@@ -658,7 +697,7 @@ export class ObjectiveExecutionController {
 		// Readiness is read after the asynchronous judgment above, so cancellation, budget and work
 		// admitted while System One was answering all reach this route.
 		const current = await this.deps.runtime.reconcileObjective(objectiveId);
-		this.assertExecutionCurrent(objectiveId);
+		this.assertExecutionCurrent(objectiveId, signal);
 		const cancelled =
 			this.deps.runtime.isCancelled?.(objectiveId) ??
 			current.objectives[objectiveId]?.objective.status === "cancelled";
@@ -683,6 +722,7 @@ export class ObjectiveExecutionController {
 			: this.deps.pendingSupervisionRequests?.().find((request) => request.objective_id === objectiveId);
 		const verificationDirective = isSameLaneVerificationDirective(pendingDirective) ? pendingDirective : undefined;
 		const currentEvidenceMarker = evidenceMarkerOf(current, objectiveId);
+		const sameEvidence = currentEvidenceMarker === judgedMarker;
 		const repeatedSameLaneVerification =
 			verificationDirective !== undefined &&
 			history.filter(
@@ -704,9 +744,10 @@ export class ObjectiveExecutionController {
 			budgetExhausted,
 			requiredWorkerInFlight,
 			ownerRequired: this.deps.ownerRequired?.(objectiveId) ?? false,
-			strategyRepetition: stall.repeatedWithoutNewEvidence,
+			targetRequirementIds: this.deps.runnableRequirements?.(objectiveId)?.slice(0, 1),
+			strategyRepetition: sameEvidence && stall.repeatedWithoutNewEvidence,
 			repeatedSameLaneVerification,
-			semantic,
+			semantic: sameEvidence ? semantic : { ...semantic, strategyRepetition: undefined },
 			...(supervisionAction && pendingSupervision
 				? {
 						supervisionRequest: {
@@ -856,13 +897,14 @@ export class ObjectiveExecutionController {
 	}
 
 	private async rejectedCompletion(
+		signal: AbortSignal | undefined,
 		objectiveId: string,
 		runtime: TaskRuntimeProjection,
 		reasonCodes: string[],
 		/** The reasons that are requests for the model's account: answered with an account, never held as findings. */
 		accountRequests: readonly string[] = [],
 	): Promise<ObjectiveTerminalResult> {
-		this.assertExecutionCurrent(objectiveId);
+		this.assertExecutionCurrent(objectiveId, signal);
 		const findings = reasonCodes.filter((reason) => !accountRequests.includes(reason));
 		if (findings.length > 0) this.deps.systemOne?.noteControlDirective?.(sameLaneVerificationDirective(findings));
 		else if (accountRequests.length > 0)
@@ -877,12 +919,14 @@ export class ObjectiveExecutionController {
 
 	/** A transition System One could not settle: the objective is not closed, and says why. */
 	private async heldCompletion(
+		goalCompletionKey: string | undefined,
 		objectiveId: string,
 		runtime: TaskRuntimeProjection,
 		reasonCodes: readonly string[],
 	): Promise<ObjectiveTerminalResult> {
 		return {
 			status: "semantic_gate_unavailable",
+			goalCompletionKey,
 			reasonCodes: [...reasonCodes],
 			cycleCount: this.cycleCounter,
 			deliveryBundle: await this.buildBundle(objectiveId, "semantic_gate_unavailable", runtime, {
@@ -915,44 +959,14 @@ export class ObjectiveExecutionController {
 		signal?: AbortSignal,
 		maxCycles?: number,
 	): Promise<ObjectiveTerminalResult | undefined> {
+		signal = objectiveExecutionSignal(this.deps, objectiveId, signal);
 		let cycles = 0;
 		while (true) {
 			if (maxCycles !== undefined && cycles++ >= maxCycles) return undefined;
 			signal?.throwIfAborted();
 
 			const runtime = await this.deps.runtime.reconcileObjective(objectiveId);
-			this.assertExecutionCurrent(objectiveId);
-
-			// PH-110..PH-112: Objective admission certificates
-			if (this.deps.steeringPlane && !this.admittedObjectives.has(objectiveId)) {
-				this.admittedObjectives.add(objectiveId);
-				// One admission state for all three checkpoints: the objective as the runtime holds it.
-				const objective = runtime.objectives[objectiveId]?.objective;
-				const admissionState = {
-					objectiveId,
-					title: objective?.title ?? objectiveId,
-					request: objective?.description ?? objectiveId,
-					constraints: objective?.constraints ?? [],
-					acceptanceCriteria: objective?.acceptanceCriteria ?? [],
-				};
-				// Admission steers reversible work: an outage or an unsettled answer does not end the objective.
-				// The route's own evidence gathering answers what admission could not; a decisive failure
-				// (an incoherent objective) still stops here.
-				// The three are independent judgments of one state: one System One request asks them all,
-				// and each still settles as its own certificate.
-				const settled = await this.deps.steeringPlane.requireCertificates(
-					["JEV-001", "JEV-002", "JEV-003"],
-					admissionState,
-					{ objectiveId, signal },
-				);
-				const admitted: string[] = [];
-				for (const outcome of settled) {
-					if (outcome.status === "fulfilled") admitted.push(outcome.value.certificate_id);
-					else if (!isReversibleDoubtOrOutage(outcome.reason)) throw outcome.reason;
-				}
-				this.admissionCerts.set(objectiveId, admitted);
-			}
-			this.assertExecutionCurrent(objectiveId);
+			this.assertExecutionCurrent(objectiveId, signal);
 
 			// 1. Check deterministic terminals
 			if (
@@ -977,6 +991,42 @@ export class ObjectiveExecutionController {
 				};
 			}
 
+			// PH-110..PH-112: Objective admission certificates
+			const lifetime = this.deps.executionSignal?.(objectiveId, true);
+			if (
+				this.deps.steeringPlane &&
+				(!this.admittedObjectives.has(objectiveId) || this.admittedObjectives.get(objectiveId) !== lifetime)
+			) {
+				// One admission state for all three checkpoints: the objective as the runtime holds it.
+				const objective = runtime.objectives[objectiveId]?.objective;
+				const admissionState = {
+					objectiveId,
+					title: objective?.title ?? objectiveId,
+					request: objective?.description ?? objectiveId,
+					constraints: objective?.constraints ?? [],
+					acceptanceCriteria: objective?.acceptanceCriteria ?? [],
+				};
+				// Admission steers reversible work: an outage or an unsettled answer does not end the objective.
+				// The route's own evidence gathering answers what admission could not; a decisive failure
+				// (an incoherent objective) still stops here.
+				// The three are independent judgments of one state: one System One request asks them all,
+				// and each still settles as its own certificate.
+				const settled = await this.deps.steeringPlane.requireCertificates(
+					["JEV-001", "JEV-002", "JEV-003"],
+					admissionState,
+					{ objectiveId, signal },
+				);
+				const admitted: string[] = [];
+				for (const outcome of settled) {
+					if (outcome.status === "fulfilled") admitted.push(outcome.value.certificate_id);
+					else if (!isReversibleDoubtOrOutage(outcome.reason)) throw outcome.reason;
+				}
+				this.assertExecutionCurrent(objectiveId, signal);
+				this.admittedObjectives.set(objectiveId, lifetime);
+				this.admissionCerts.set(objectiveId, admitted);
+			}
+			this.assertExecutionCurrent(objectiveId, signal);
+
 			// 2. Join this objective's in-flight workers and any running work that may mutate its repository.
 			// The join is a decided route: composed, checkpointed and current before the loop waits on it.
 			const activeAttempts = objectiveJoinAttempts(runtime, objectiveId, this.deps.repoRoot);
@@ -989,21 +1039,23 @@ export class ObjectiveExecutionController {
 					});
 					await this.deps.checkpoints?.recordRoute?.(waitRoute);
 					this._lastRoute = waitRoute;
-					await this._noteExecutor(waitRoute, waitRoute.route);
-					try {
-						await this.deps.waiter.wait({ inFlightAttempts: activeAttempts }, signal);
-					} finally {
-						this._lastExecutor = undefined;
-					}
+					const waiter = this.deps.waiter;
+					await runAdmittedRoute(
+						() => waiter.wait({ inFlightAttempts: activeAttempts }, signal),
+						() => this._noteExecutor(waitRoute, runtime, waitRoute.route),
+					);
 					continue;
 				}
 			}
 
+			if (objectiveNeedsCorrectedOutcome(runtime.objectives[objectiveId])) {
+				await this.deps.reviewCorrectedOutcome?.(objectiveId, signal);
+				this.assertExecutionCurrent(objectiveId, signal);
+			}
 			// 3. Evaluate route
 			const route = await this.evaluateRouteOnce(objectiveId, { signal });
-			this.assertExecutionCurrent(objectiveId);
+			this.assertExecutionCurrent(objectiveId, signal);
 			this._lastRoute = route;
-			this._lastExecutor = undefined;
 			const verificationRecovery = route.reason_codes.includes(SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE);
 			const recoveryFingerprint = verificationRecovery
 				? this.verificationRecoveryFingerprint(objectiveId, await this.deps.runtime.reconcileObjective(objectiveId))
@@ -1141,14 +1193,14 @@ export class ObjectiveExecutionController {
 			}
 
 			// 5. Dispatch based on route (FIN-051, FIN-052: Explicit failure if executor is missing)
-			this.assertExecutionCurrent(objectiveId);
+			this.assertExecutionCurrent(objectiveId, signal);
 			switch (route.route) {
 				case "retrieve":
 					if (!this.deps.retrieval?.execute && this.deps.rootExecutor) {
 						// No dedicated retrieval executor: the root reads, with the route's brief.
-						await this._noteExecutor(route, "root");
-						this.assertExecutionCurrent(objectiveId);
-						await this.deps.rootExecutor.execute(route, signal);
+						await executeWithRouteAdmission(this.deps.rootExecutor, route, signal, () =>
+							this._noteExecutor(route, runtime, "root"),
+						);
 						break;
 					}
 					if (!this.deps.retrieval?.execute) {
@@ -1160,21 +1212,25 @@ export class ObjectiveExecutionController {
 							deliveryBundle: bundle,
 						};
 					}
-					this._lastExecutor = (await this.deps.retrieval.execute(route, signal)) ?? this._lastExecutor;
+					await executeObjectiveRetrieval(this.deps.retrieval, route, signal, (executor) =>
+						this._noteExecutor(route, runtime, executor),
+					);
 					break;
 
 				case "deterministic_test":
 					if (isSameLaneVerificationDirective({ objectiveRoute: route.route, reasonCodes: route.reason_codes })) {
 						if (!this.deps.rootExecutor)
 							throw new Error("Same-lane verification requires the receiving root executor.");
-						await this._noteExecutor(route, "root");
-						this.assertExecutionCurrent(objectiveId);
-						await this.deps.rootExecutor.execute(route, signal);
+						await executeWithRouteAdmission(this.deps.rootExecutor, route, signal, () =>
+							this._noteExecutor(route, runtime, "root"),
+						);
 						break;
 					}
 					if (!this.deps.verifier?.execute && this.deps.rootExecutor) {
 						// No dedicated verifier: the root runs the checks, with the route's brief.
-						await this.deps.rootExecutor.execute(route, signal);
+						await executeWithRouteAdmission(this.deps.rootExecutor, route, signal, () =>
+							this._noteExecutor(route, runtime, "root"),
+						);
 						break;
 					}
 					if (!this.deps.verifier?.execute) {
@@ -1187,7 +1243,9 @@ export class ObjectiveExecutionController {
 						};
 					}
 					try {
-						await this.deps.verifier.execute(route, signal);
+						await executeWithRouteAdmission(this.deps.verifier, route, signal, () =>
+							this._noteExecutor(route, runtime, route.route),
+						);
 					} catch (err) {
 						const lastAttempt = Array.from(this.attemptBindings.entries()).pop();
 						if (this.deps.outcomeRecorder && lastAttempt) {
@@ -1229,8 +1287,30 @@ export class ObjectiveExecutionController {
 							deliveryBundle: bundle,
 						};
 					}
-					await this.deps.workerDispatcher.continueWorker(route, signal, this._lastBinding);
-					this.assertExecutionCurrent(objectiveId);
+					{
+						const dispatcher = this.deps.workerDispatcher;
+						const admission = await executeObjectiveWorker(
+							(admit) => dispatcher.continueWorker(route, signal, this._lastBinding, admit),
+							() => this._noteExecutor(route, runtime, "worker"),
+						);
+						if (admission?.started === false) {
+							if (!admission.pending) {
+								const reasons = ["worker_admission_refused", admission.reason];
+								return (
+									this.deps.runtime.recordExecutorRefusal?.(objectiveId, route, reasons) ?? {
+										status: "blocked",
+										reasonCodes: reasons,
+										cycleCount: this.cycleCounter,
+										deliveryBundle: await this.buildBundle(objectiveId, "incomplete", runtime, {
+											reasonCodes: reasons,
+										}),
+									}
+								);
+							}
+							await this._noteExecutor(route, runtime, PENDING_WORKER_EXECUTOR);
+						}
+					}
+					this.assertExecutionCurrent(objectiveId, signal);
 					this.acknowledgeRouteRequests(route);
 					break;
 
@@ -1242,10 +1322,9 @@ export class ObjectiveExecutionController {
 							currentExpert: this._lastBinding?.model_id,
 							signal,
 						});
-						this.assertExecutionCurrent(objectiveId);
+						this.assertExecutionCurrent(objectiveId, signal);
 
 						if (resolution.dimension === "specialist" && this.deps.specialistSynthesis) {
-							// FC-023, FC-024, FC-025: Real dynamic SpecialistNeed from resolution (never adaptation node id)
 							const need = resolution.specialistNeed ?? {
 								specialty: "code_architecture_specialist",
 								purpose: `Fulfill specialist need for ${objectiveId} (${resolution.action || "targeted expert synthesis"})`,
@@ -1257,9 +1336,8 @@ export class ObjectiveExecutionController {
 								charter,
 								signal,
 							});
-							this.assertExecutionCurrent(objectiveId);
+							this.assertExecutionCurrent(objectiveId, signal);
 
-							// ERC-040..ERC-045: Materialized specialist becomes durable task, attempt, and worker execution
 							const specTaskId = `${objectiveId}-spec-${this.cycleCounter}`;
 							await this.runSpecialistWorkerExecution(
 								runtime,
@@ -1271,7 +1349,6 @@ export class ObjectiveExecutionController {
 								this.cycleCounter,
 							);
 
-							// ERC-046: Objective resumes
 							break;
 						}
 
@@ -1298,11 +1375,11 @@ export class ObjectiveExecutionController {
 
 				case "completion_candidate": {
 					await this.deps.waitForRepositoryQuiescence?.(objectiveId, signal);
-					this.assertExecutionCurrent(objectiveId);
+					this.assertExecutionCurrent(objectiveId, signal);
 					// A checked requirement is proven by rerunning its check, before any judgment. A failed
 					// check is repair work for the loop, never a terminal state.
-					const checkProof = await this.deps.proveRequirementChecks?.(signal);
-					this.assertExecutionCurrent(objectiveId);
+					const checkProof = await this.deps.proveRequirementChecks?.(signal, objectiveId);
+					this.assertExecutionCurrent(objectiveId, signal);
 					const checkRefusal = checkProof ? describeRequirementCheckRefusal(checkProof) : undefined;
 					if (checkProof && checkRefusal) {
 						const failedChecks = checkProof.unrunnable
@@ -1325,6 +1402,12 @@ export class ObjectiveExecutionController {
 						}
 						break;
 					}
+					const admission = this.deps.prepareGoalCompletion?.(objectiveId);
+					if (admission?.refusal)
+						return { status: "incomplete", reasonCodes: [admission.refusal], cycleCount: this.cycleCounter };
+					// Check reruns can replace the previous proof. Review the synchronized receipts that just ran.
+					const runtime = await this.deps.runtime.reconcileObjective(objectiveId);
+					this.assertExecutionCurrent(objectiveId, signal);
 					// FIN-060: Single completion owner via CompletionCoordinator
 					const profile = resolveEffectiveCompletionProfile({
 						requestedProfile: this.deps.completionProfile,
@@ -1384,7 +1467,10 @@ export class ObjectiveExecutionController {
 						? candidateSnapshot.trackedDiffBytes.length === 0 && candidateSnapshot.untracked.length === 0
 						: undefined;
 
+					const correction = objRecord?.goalSource?.lastCorrection;
+					const correctionScope = correction ? { ownerCorrection: correction } : {};
 					const canonicalProofState = {
+						...correctionScope,
 						objectiveId,
 						cycleCount: this.cycleCounter,
 						evidenceRevision,
@@ -1422,13 +1508,14 @@ export class ObjectiveExecutionController {
 							onAdvisory: recordCompletionAdvice,
 						});
 						if (j24.certificate) steeringCertRefs.push(j24.certificate.certificate_id);
-						if (j24.kind === "held") return this.heldCompletion(objectiveId, runtime, j24.reasonCodes);
+						if (j24.kind === "held")
+							return this.heldCompletion(admission?.key, objectiveId, runtime, j24.reasonCodes);
 						if (
 							j24.kind === "judged" &&
 							(j24.certificate.semantic_outcome !== "pass" ||
 								j24.certificate.directive !== "completion_candidate")
 						) {
-							return this.rejectedCompletion(objectiveId, runtime, [
+							return this.rejectedCompletion(signal, objectiveId, runtime, [
 								"completion_not_plausible",
 								...(j24.certificate.failed_semantic_predicates ?? []),
 							]);
@@ -1448,9 +1535,11 @@ export class ObjectiveExecutionController {
 							},
 							{ record: ruleAuthority !== "ask" },
 						);
+						this.assertExecutionCurrent(objectiveId, signal);
 						if (blocksRuleTransition(completionRules)) {
 							if (completionRules.verificationRequired) {
 								return this.rejectedCompletion(
+									signal,
 									objectiveId,
 									runtime,
 									completionRules.violations.map((finding) => finding.explanation),
@@ -1485,12 +1574,12 @@ export class ObjectiveExecutionController {
 						semanticEvaluator: this.deps.systemOne?.executeCompletionTransaction
 							? {
 									evaluateCompletion: async (_objId, opts) => {
-										this.assertExecutionCurrent(objectiveId);
+										this.assertExecutionCurrent(objectiveId, signal);
 										const verdict = await this.deps.systemOne!.executeCompletionTransaction!(bugFix, {
 											...opts,
 											persistTerminal: false,
 										});
-										this.assertExecutionCurrent(objectiveId);
+										this.assertExecutionCurrent(objectiveId, signal);
 										completionAdvice.push(...(verdict.advisories ?? []).map((advice) => advice.reason));
 										completionFinding = verdict;
 										return {
@@ -1509,13 +1598,14 @@ export class ObjectiveExecutionController {
 					const evalResult = await CompletionCoordinator.evaluate(objectiveId, profile, completionContext, {
 						signal,
 					});
-					this.assertExecutionCurrent(objectiveId);
+					this.assertExecutionCurrent(objectiveId, signal);
 					this.acknowledgeRouteRequests(route);
 					if (
 						completionFinding?.verdict === "blocked_external" &&
 						completionFinding.diagnostic === "evaluator_unavailable"
 					) {
 						return this.heldCompletion(
+							admission?.key,
 							objectiveId,
 							runtime,
 							completionFinding.failed_gates.map((finding) => `${finding.id}: ${finding.reason}`),
@@ -1525,6 +1615,7 @@ export class ObjectiveExecutionController {
 						const describe = (finding: { id: string; reason: string; required_next_proof: string }) =>
 							`${finding.id}: ${finding.reason}. ${finding.required_next_proof}`;
 						return this.rejectedCompletion(
+							signal,
 							objectiveId,
 							runtime,
 							completionFinding.failed_gates.map(describe),
@@ -1559,10 +1650,11 @@ export class ObjectiveExecutionController {
 								{ objectiveId, evidenceRevision, signal, holdOnUnsettled, onAdvisory: recordCompletionAdvice },
 							);
 							if (j25.certificate) steeringCertRefs.push(j25.certificate.certificate_id);
-							if (j25.kind === "held") return this.heldCompletion(objectiveId, runtime, j25.reasonCodes);
+							if (j25.kind === "held")
+								return this.heldCompletion(admission?.key, objectiveId, runtime, j25.reasonCodes);
 
 							if (j25.kind === "judged" && j25.certificate.semantic_outcome !== "pass") {
-								return this.rejectedCompletion(objectiveId, runtime, [
+								return this.rejectedCompletion(signal, objectiveId, runtime, [
 									"primary_completion_failed",
 									...(j25.certificate.failed_semantic_predicates ?? []),
 								]);
@@ -1570,6 +1662,7 @@ export class ObjectiveExecutionController {
 
 							// 4. PH-153, FC-064, FC-073: JEV-026 cold adversarial challenge (cold proof-bearing)
 							const coldProofState = {
+								...correctionScope,
 								objectiveId,
 								acceptanceCriteria: canonicalProofState.acceptanceCriteria,
 								evidenceRefs: canonicalProofState.evidenceRefs,
@@ -1586,11 +1679,12 @@ export class ObjectiveExecutionController {
 								onAdvisory: recordCompletionAdvice,
 							});
 							if (j26.certificate) steeringCertRefs.push(j26.certificate.certificate_id);
-							if (j26.kind === "held") return this.heldCompletion(objectiveId, runtime, j26.reasonCodes);
+							if (j26.kind === "held")
+								return this.heldCompletion(admission?.key, objectiveId, runtime, j26.reasonCodes);
 							// The challenge pack's own failures (a missing requirement among them) are the certificate's
 							// failed predicates; its outcome is the whole verdict.
 							if (j26.kind === "judged" && j26.certificate.semantic_outcome !== "pass") {
-								return this.rejectedCompletion(objectiveId, runtime, [
+								return this.rejectedCompletion(signal, objectiveId, runtime, [
 									"adversarial_completion_failed",
 									...(j26.certificate.failed_semantic_predicates ?? []),
 								]);
@@ -1648,6 +1742,7 @@ export class ObjectiveExecutionController {
 									"JEV-028",
 									{
 										objectiveId,
+										...correctionScope,
 										publishRequested: Boolean(activeCharter.release.package_publish),
 										deployTargets: activeCharter.release.deploy_targets,
 										releaseRules: activeCharter.release,
@@ -1662,11 +1757,12 @@ export class ObjectiveExecutionController {
 									},
 								);
 								if (j28.certificate) steeringCertRefs.push(j28.certificate.certificate_id);
-								if (j28.kind === "held") return this.heldCompletion(objectiveId, runtime, j28.reasonCodes);
+								if (j28.kind === "held")
+									return this.heldCompletion(admission?.key, objectiveId, runtime, j28.reasonCodes);
 
 								// deploy_safe is one of the outcome's predicates: a pass already means it held.
 								if (j28.kind === "judged" && j28.certificate.semantic_outcome !== "pass") {
-									return this.rejectedCompletion(objectiveId, runtime, [
+									return this.rejectedCompletion(signal, objectiveId, runtime, [
 										"release_readiness_rejected",
 										...(j28.certificate.failed_semantic_predicates ?? []),
 									]);
@@ -1680,7 +1776,8 @@ export class ObjectiveExecutionController {
 								: activeCharter;
 						const sideEffects = await executeDelivery({
 							beforeEffect: () => {
-								this.assertExecutionCurrent(objectiveId);
+								admission?.assertCurrent();
+								this.assertExecutionCurrent(objectiveId, signal);
 								assertVerificationResolved(this.deps.systemOne?.peekControlDirective?.());
 							},
 							charter: deliveryCharter,
@@ -1695,7 +1792,7 @@ export class ObjectiveExecutionController {
 							worktreeClean,
 							expectedArtifactDigest: packageArtifact?.integrity,
 						});
-						this.assertExecutionCurrent(objectiveId);
+						this.assertExecutionCurrent(objectiveId, signal);
 						if (isSameLaneVerificationDirective(this.deps.systemOne?.peekControlDirective?.())) {
 							const reasons = this.deps.systemOne?.peekControlDirective?.()?.reasonCodes ?? [];
 							return {
@@ -1756,6 +1853,7 @@ export class ObjectiveExecutionController {
 						}
 
 						const finished = await finalizeDelivery({
+							...correctionScope,
 							bundle: enrichedBundle,
 							sideEffects,
 							objectiveId,
@@ -1769,13 +1867,17 @@ export class ObjectiveExecutionController {
 							systemOne: this.deps.systemOne?.commitTerminalCompletion
 								? {
 										commitTerminalCompletion: (proof, options) => {
-											this.assertExecutionCurrent(objectiveId);
-											return this.deps.systemOne!.commitTerminalCompletion!(proof, options);
+											admission?.assertCurrent();
+											this.assertExecutionCurrent(objectiveId, signal);
+											return this.deps.systemOne!.commitTerminalCompletion!(proof, {
+												...options,
+												assertCurrent: admission?.assertCurrent,
+											});
 										},
 									}
 								: undefined,
 						});
-						this.assertExecutionCurrent(objectiveId);
+						this.assertExecutionCurrent(objectiveId, signal);
 						if (finished.status !== "complete") {
 							if (finished.status === "incomplete")
 								this.deps.systemOne?.noteControlDirective?.(
@@ -1783,6 +1885,7 @@ export class ObjectiveExecutionController {
 								);
 							return {
 								status: finished.status,
+								goalCompletionKey: admission?.key,
 								reasonCodes: [...finished.reasonCodes],
 								cycleCount: this.cycleCounter,
 								deliveryBundle: finished.bundle,
@@ -1792,6 +1895,7 @@ export class ObjectiveExecutionController {
 						await this._recordCompletionOutcomes(objectiveId, route, { verificationPassed: true });
 						return {
 							status: "complete",
+							goalCompletionKey: admission?.key,
 							reasonCodes: [...finished.reasonCodes],
 							completionDecisionId: evalResult.semanticRefs?.[0],
 							cycleCount: this.cycleCounter,
@@ -1866,19 +1970,22 @@ export class ObjectiveExecutionController {
 						};
 					}
 					const inFlightAttempts = this.routeWaitAttempts.get(route);
-					await this.deps.waiter.wait(inFlightAttempts ? { inFlightAttempts } : route, signal);
+					const waiter = this.deps.waiter;
+					await runAdmittedRoute(
+						() => waiter.wait(inFlightAttempts ? { inFlightAttempts } : route, signal),
+						() => this._noteExecutor(route, runtime, route.route),
+					);
 					break;
 				}
 			}
 
-			this.assertExecutionCurrent(objectiveId);
+			this.assertExecutionCurrent(objectiveId, signal);
 			this.acknowledgeRouteRequests(route);
-			await this.deps.checkpoints?.recordRouteOutcome?.(route, this._lastExecutor ?? route.route);
-			this._lastExecutor = undefined;
+			await this._noteExecutor(route, runtime, this.executors.get(route) ?? route.route);
 
 			// 6. Ingest evidence & validate postflight
 			await this.deps.evidence?.ingestLatest?.(objectiveId);
-			this.assertExecutionCurrent(objectiveId);
+			this.assertExecutionCurrent(objectiveId, signal);
 			await this.deps.systemOne?.validateObjectivePostflight?.(objectiveId);
 			// A returned root recovery, unlike a decided route or interrupted executor, spent this
 			// evidence's recovery allowance. New diagnostic/check evidence changes the fingerprint.
@@ -1898,7 +2005,7 @@ export class ObjectiveExecutionController {
 					boundedDiffEvidence: postflightState,
 					signal,
 				});
-				this.assertExecutionCurrent(objectiveId);
+				this.assertExecutionCurrent(objectiveId, signal);
 				if (blocksRuleTransition(postflight)) {
 					if (postflight.verificationRequired) {
 						this.deps.systemOne?.noteControlDirective?.(
@@ -1918,16 +2025,13 @@ export class ObjectiveExecutionController {
 				}
 			}
 
-			// 7. Stall evaluation
-			let stall: StallEvaluation;
-			if (this.deps.stalls) {
-				stall = await this.deps.stalls.evaluate(objectiveId);
-			} else {
-				stall = this.defaultStallDetector.evaluate({
-					currentRevision: this.cycleCounter,
-					isWaiting: route.route === "wait_for_worker" || route.route === "wait_for_tool",
-				});
-			}
+			// Read actual postflight evidence; a new routing cycle alone is never progress.
+			const stall =
+				(await this.deps.stalls?.evaluate(objectiveId)) ??
+				evaluateRouteHistory(
+					await this.recentRouteHistory(objectiveId),
+					evidenceMarkerOf(await this.deps.runtime.reconcileObjective(objectiveId), objectiveId),
+				);
 
 			if (stall.repeatedWithoutNewEvidence) {
 				await this.deps.runtime.requestReplan?.(objectiveId, stall);
@@ -1942,138 +2046,29 @@ export class ObjectiveExecutionController {
 		escalated: boolean,
 		signal?: AbortSignal,
 	): Promise<ObjectiveTerminalResult | undefined> {
-		this.assertExecutionCurrent(objectiveId);
-		// The root executes what System One did not hand to an independent worker: a review and an
-		// escalation always go to a worker, so does a verification that must be independent.
-		const sameLaneVerificationRecovery = route.reason_codes.includes(SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE);
-		if (
-			this.deps.rootExecutor &&
-			!escalated &&
-			!route.reason_codes.includes(INDEPENDENT_VERIFICATION_REASON_CODE) &&
-			(sameLaneVerificationRecovery ||
-				(route.route !== "review" &&
-					(!this.deps.workerDispatcher?.dispatch || (this.deps.chooseExecutor?.(route) ?? "root") === "root")))
-		) {
-			await this._noteExecutor(route, "root");
-			this.assertExecutionCurrent(objectiveId);
-			await this.deps.rootExecutor.execute(route, signal);
-			return undefined;
-		}
-		await this._noteExecutor(route, escalated ? "worker:escalated" : "worker");
-		const dispatcher = escalated
-			? this.deps.workerDispatcher?.dispatchEscalated
-			: this.deps.workerDispatcher?.dispatch;
-		const missingCode = escalated
-			? "missing_required_executor:workerDispatcher.dispatchEscalated"
-			: "missing_required_executor:workerDispatcher.dispatch";
-
-		if (!dispatcher) {
-			const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
-			return {
-				status: "unrecoverable",
-				reasonCodes: [missingCode],
-				cycleCount: this.cycleCounter,
-				deliveryBundle: bundle,
-			};
-		}
-
-		let binding: ExpertBinding | undefined;
-		let selectionResult: ExpertSelectionResult | undefined;
-		const taskId = `${objectiveId}-${escalated ? "escalate" : route.route}-${this.cycleCounter}`;
-		if (this.deps.expertSelector) {
-			const priorAttempts = Object.values(runtime.attempts);
-			const consequence = escalated
-				? "critical"
-				: route.route === "verify" || route.route === "review"
-					? "high"
-					: "medium";
-			const request = buildWorkerCapabilityRequest({
-				objectiveId,
-				taskId,
-				route,
-				consequence,
-				decisionSignals: escalated ? { capabilityEscalationRequired: true } : undefined,
-				priorAttempts,
-			});
-			try {
-				// System One judges the category from the objective's own words; the ranking only falls back.
-				const objectiveRecord = runtime.objectives[objectiveId]?.objective;
-				selectionResult = await this.deps.expertSelector.select(request, {
-					signal,
-					requestText: [objectiveRecord?.title, objectiveRecord?.description, route.route]
-						.filter(Boolean)
-						.join("\n"),
-				});
-				binding = selectionResult.primary;
-				this._lastBinding = binding;
-				this.attemptBindings.set(taskId, { binding, route });
-			} catch (error) {
-				if (error instanceof NoEligibleExpertError) {
-					const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
-						reasonCodes: ["no_eligible_expert", ...error.rejectedCandidates.flatMap((r) => r.reasonCodes)],
-					});
-					return {
-						status: "unrecoverable",
-						reasonCodes: ["no_eligible_expert"],
-						cycleCount: this.cycleCounter,
-						deliveryBundle: bundle,
-					};
-				}
-				throw error;
-			}
-		}
-
-		// FC-040: Pre-implementation responsibility guard before material write
-		let responsibilityStatement: ResponsibilityStatement | undefined;
-		if (route.route === "implement" && this.deps.responsibilityController) {
-			responsibilityStatement = {
-				statement: `Implementation for ${objectiveId} (${route.route})`,
-				targetLocation: `packages/coding-agent/src/core/${objectiveId}`,
-			};
-			await this.deps.responsibilityController.preImplementation({
-				objectiveId,
-				taskId,
-				proposed: responsibilityStatement,
-				signal,
-			});
-		}
-
-		try {
-			this.assertExecutionCurrent(objectiveId);
-			await dispatcher(route, signal, binding);
-			this.assertExecutionCurrent(objectiveId);
-
-			// FC-041: Post-mutation responsibility guard before task acceptance
-			if (route.route === "implement" && this.deps.responsibilityController && responsibilityStatement) {
-				const artifacts = (await this.deps.runtime.getArtifacts?.(objectiveId)) ?? [];
-				const changedFiles =
-					artifacts.length > 0 ? artifacts.map((a) => a.path) : [responsibilityStatement.targetLocation];
-				for (const mutatedFile of changedFiles) {
-					const postVerdict = await this.deps.responsibilityController.postMutation({
-						objectiveId,
-						taskId,
-						responsibility: responsibilityStatement,
-						mutatedFile,
-						signal,
-					});
-					if (postVerdict.unintentionalDuplicate) {
-						if (this.deps.runtime.ensureRepairTasks) {
-							const repairs = completionFailuresToRepairWork(
-								[{ gate_id: "duplicate_responsibility_detected" }],
-								objectiveId,
-							);
-							await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
-						}
-						throw new Error(`Semantic duplicate responsibility detected in ${mutatedFile} (FC-041)`);
-					}
-				}
-			}
-		} finally {
-			if (selectionResult && this.deps.expertSelector) {
-				this.deps.expertSelector.release(selectionResult);
-			}
-		}
-		return undefined;
+		return dispatchObjectiveRoute(
+			{
+				deps: this.deps,
+				cycle: this.cycleCounter,
+				assertCurrent: () => this.assertExecutionCurrent(objectiveId, signal),
+				noteExecutor: (executor) => this._noteExecutor(route, runtime, executor),
+				noteBinding: (taskId, binding) => {
+					this._lastBinding = binding;
+					this.attemptBindings.set(taskId, { binding, route });
+				},
+				refuse: async (reasonCodes) => ({
+					status: "unrecoverable",
+					reasonCodes,
+					cycleCount: this.cycleCounter,
+					deliveryBundle: await this.buildBundle(objectiveId, "unrecoverable", runtime, { reasonCodes }),
+				}),
+			},
+			objectiveId,
+			route,
+			runtime,
+			escalated,
+			signal,
+		);
 	}
 
 	private async _recordCompletionOutcomes(
@@ -2122,16 +2117,10 @@ export class ObjectiveExecutionController {
 		verificationMatrix: Record<string, unknown>;
 	}> {
 		const objRecord = runtime.objectives[objectiveId];
-		const canonicalRevision =
-			((await this.deps.evidence?.reconcile)
-				? (this.deps.evidence as any)?.getEvidenceRevision?.(objectiveId)
-				: undefined) ?? (await (this.deps.runtime as any)?.getEvidenceRevision?.(objectiveId));
 		const evidenceRevision =
-			typeof canonicalRevision === "number"
-				? canonicalRevision
-				: objRecord?.evidence && objRecord.evidence.length > 0
-					? objRecord.evidence.length
-					: 1;
+			(await this.deps.evidence?.getEvidenceRevision?.(objectiveId)) ??
+			(await this.deps.runtime.getEvidenceRevision?.(objectiveId)) ??
+			evidenceMarkerOf(runtime, objectiveId);
 		const artifacts = (await this.deps.runtime.getArtifacts?.(objectiveId)) ?? [];
 		const verificationMatrix: Record<string, unknown> = {};
 		for (const e of objRecord?.evidence ?? []) {
@@ -2168,15 +2157,15 @@ export class ObjectiveExecutionController {
 		signal?: AbortSignal,
 		evidenceRevision?: number,
 	): Promise<WorkerResultContract | undefined> {
-		this.assertExecutionCurrent(objectiveId);
-		const specTask = runtime?.createTask?.({
+		this.assertExecutionCurrent(objectiveId, signal);
+		const dispatchRuntime = this.deps.workerDispatcher?.ownsSpecialistAttempts ? undefined : runtime;
+		const specTask = dispatchRuntime?.createTask?.({
 			objectiveId,
 			title: specialist.spec.mission,
 			description: specialist.spec.purpose,
 			role: specialist.spec.authority_role,
 		}) ?? { taskId: specTaskId };
-		const specGrantId = `grant-${specTaskId}`;
-		const specAttempt = runtime?.queueAttempt?.(
+		const specAttempt = dispatchRuntime?.queueAttempt?.(
 			specTask.taskId,
 			{
 				taskId: specTask.taskId,
@@ -2184,26 +2173,40 @@ export class ObjectiveExecutionController {
 				instructions: specialist.spec.mission,
 				resourcePointerIds: [],
 			},
-			specGrantId,
+			`grant-${specTaskId}`,
 		) ?? { attemptId: `att-${specTaskId}` };
 		(specAttempt as any).profileId = specialist.profileId;
-		const specLease = runtime?.leaseAttempt?.(specAttempt.attemptId, `owner-spec-${specialist.specialistId}`, 60000);
+		const specLease = dispatchRuntime?.leaseAttempt?.(
+			specAttempt.attemptId,
+			`owner-spec-${specialist.specialistId}`,
+			60000,
+		);
 		if (specLease) {
-			runtime?.startAttempt?.(specAttempt.attemptId, specLease.leaseId, specLease.fencingToken);
+			dispatchRuntime?.startAttempt?.(specAttempt.attemptId, specLease.leaseId, specLease.fencingToken);
 		}
 
 		let workerResult: WorkerResultContract | undefined;
 		if (this.deps.workerDispatcher?.dispatchSpecialist) {
-			workerResult = await this.deps.workerDispatcher.dispatchSpecialist({
-				objectiveId,
-				specialist,
-				taskId: specTask.taskId,
-				attemptId: specAttempt.attemptId,
-				leaseId: specLease?.leaseId,
-				fencingToken: specLease?.fencingToken,
-				expiresAt: specLease?.expiresAt,
-				signal,
-			});
+			const dispatcher = this.deps.workerDispatcher;
+			const snapshot: TaskRuntimeProjection =
+				runtime?.getSnapshot?.() ??
+				(runtime?.objectives ? runtime : await this.deps.runtime.reconcileObjective(objectiveId));
+			workerResult = await executeObjectiveSpecialist(
+				(admit) =>
+					dispatcher.dispatchSpecialist!({
+						route,
+						onStarted: admit,
+						objectiveId,
+						specialist,
+						taskId: specTask.taskId,
+						attemptId: specAttempt.attemptId,
+						leaseId: specLease?.leaseId,
+						fencingToken: specLease?.fencingToken,
+						expiresAt: specLease?.expiresAt,
+						signal,
+					}),
+				(executor) => this._noteExecutor(route, snapshot, executor),
+			);
 		} else if (this.deps.workerDispatcher?.dispatch) {
 			await this.deps.workerDispatcher.dispatch(route, signal, {
 				model_id: specialist.expert.modelId,
@@ -2217,16 +2220,15 @@ export class ObjectiveExecutionController {
 		}
 
 		if (workerResult) {
-			const aligned: WorkerResultContract = {
+			dispatchRuntime?.finishAttempt?.({
 				...workerResult,
 				objectiveId,
 				taskId: specTask.taskId,
 				attemptId: specAttempt.attemptId,
 				leaseId: specLease?.leaseId ?? workerResult.leaseId,
 				fencingToken: specLease?.fencingToken ?? workerResult.fencingToken,
-			};
-			runtime?.finishAttempt?.(aligned);
-			this.assertExecutionCurrent(objectiveId);
+			});
+			this.assertExecutionCurrent(objectiveId, signal);
 
 			const normalizedEvidence = {
 				resultId: workerResult.resultId,
@@ -2239,9 +2241,7 @@ export class ObjectiveExecutionController {
 				usage: workerResult.usage,
 				modelBinding: specialist.expert,
 			};
-			if (this.deps.systemOne?.recordHostEvidence) {
-				await this.deps.systemOne.recordHostEvidence(normalizedEvidence);
-			}
+			await this.deps.systemOne?.recordHostEvidence?.(normalizedEvidence);
 
 			if (this.deps.specialistSynthesis?.evaluateEffectiveness) {
 				await this.deps.specialistSynthesis.evaluateEffectiveness(specialist, normalizedEvidence, {

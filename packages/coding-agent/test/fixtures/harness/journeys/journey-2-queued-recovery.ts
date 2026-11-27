@@ -13,6 +13,8 @@ import {
 import { sessionRootAddress, sessionRootReplyMessageId } from "../../../../src/core/delegation/session-root-mailbox.ts";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "../../../../src/core/delegation/worker-mailbox-record.ts";
+import { LedgerRouteCheckpoints } from "../../../../src/core/objective-execution/ledger-route-checkpoints.ts";
+import { composeObjectiveRoute } from "../../../../src/core/objective-execution/objective-route-policy.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
@@ -109,30 +111,6 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 	});
 	await withDeadline(trace, "E7 start A", e7Owner.session.prompt("Start the held check."));
 	await withDeadline(trace, "E7 worker A held at its first request", e7AHeldReached.promise, 90_000);
-	// B starts only after A is physically held, so A's running lease is what the natural cap counts.
-	world.provider.enqueue(
-		"root",
-		calls("e7-start-b", [
-			{
-				id: "e7-start-b-1",
-				name: "delegate",
-				arguments: {
-					action: "start",
-					model: { provider: "harness-script", modelId: "worker-b" },
-					instructions: "Report the current limits value.",
-				},
-			},
-		]),
-		{ name: "e7-b-reported", reply: { content: [{ type: "text", text: "Worker B is queued." }] } },
-	);
-	world.systemOne.enterPhase("e7-queue", e7Judgments, {
-		expect: expectOwnerWords({
-			sessionManager: () => e7Owner.sessionManager,
-			userRequests: ["Queue the second check behind it."],
-			optionalToolNames: ["secret_store"],
-		}),
-	});
-	await withDeadline(trace, "E7 queue B", e7Owner.session.prompt("Queue the second check behind it."));
 	const e7Start = (
 		toolCallId: string,
 	): { started: boolean; agentId: string; laneId: string; text: string; h: unknown } => {
@@ -162,17 +140,77 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		};
 	};
 	const e7StartA = e7Start("e7-start-a-1");
-	const e7StartB = e7Start("e7-start-b-1");
-	expect({ a: e7StartA.started, b: e7StartB.started }, "both starts are accepted").toEqual({ a: true, b: true });
-	// The host's state code for a queued lane rides in the record (`details.h`); a running lane carries none.
-	expect({ a: e7StartA.h, b: e7StartB.h }, "only the queued start carries the QUEUED state code").toEqual({
-		a: undefined,
-		b: ["QUEUED"],
+	// B queues behind A's actual lease. The semantic profile enters through host route admission.
+	// The other profile exercises the owner-facing delegate tool and its queue receipt.
+	const sessionId = e7Owner.session.sessionId;
+	const objectiveId = `session:${sessionId}`;
+	const route = composeObjectiveRoute({
+		objectiveId,
+		cycleId: "cycle_e7_queued_recovery",
+		semantic: { missingWorkClass: "investigate" },
 	});
-	expect(
-		e7StartB.text.includes("capacity: 1 running of 1 allowed"),
-		`B queues behind the natural capacity cap; its start receipt: ${e7StartB.text}`,
-	).toBe(true);
+	const origin = { sessionId, objectiveId, cycleId: route.cycle_id, executor: "worker" as const };
+	const queueB = async () => {
+		if (world.systemOne.enabled) {
+			const checkpoints = new LedgerRouteCheckpoints({
+				sessionId,
+				cwd: e7Owner.sessionManager.getCwd(),
+				getSnapshot: () => e7Owner.session.backgroundLanes.getTaskRuntimeSnapshot(),
+				getLedger: () => e7Owner.session.getDecisionLedger(),
+			});
+			await checkpoints.recordRoute(route);
+			const queued = await withDeadline(
+				trace,
+				"E7 host queues the routed worker",
+				e7Owner.session.backgroundLanes.startWorkerDelegation({
+					instructions: "Report the current limits value.",
+					authority: { model: { provider: "harness-script", modelId: "worker-b" } },
+					objectiveId,
+					objectiveRouteOrigin: origin,
+				}),
+			);
+			if (!queued.started) throw new Error(`E7 worker was refused: ${queued.skipReason}`);
+			expect(queued.record.status).toBe("queued");
+			const rows = e7Owner.session
+				.getDecisionLedger()
+				?.recentRoutes(sessionId, objectiveId, 8)
+				.filter((row) => row.cycleId === route.cycle_id);
+			expect(rows, "the queued route has exactly one decision before the cut").toHaveLength(1);
+			expect(rows?.[0]?.executor, "queueing alone credits no executor").toBeUndefined();
+			return { laneId: queued.record.laneId, agentId: queued.record.agentId ?? queued.record.laneId };
+		}
+		world.provider.enqueue(
+			"root",
+			calls("e7-start-b", [
+				{
+					id: "e7-start-b-1",
+					name: "delegate",
+					arguments: {
+						action: "start",
+						model: { provider: "harness-script", modelId: "worker-b" },
+						instructions: "Report the current limits value.",
+					},
+				},
+			]),
+			{ name: "e7-b-reported", reply: { content: [{ type: "text", text: "Worker B is queued." }] } },
+		);
+		world.systemOne.enterPhase("e7-queue", e7Judgments, {
+			expect: expectOwnerWords({
+				sessionManager: () => e7Owner.sessionManager,
+				userRequests: ["Queue the second check behind it."],
+				optionalToolNames: ["secret_store"],
+			}),
+		});
+		await withDeadline(trace, "E7 queue B", e7Owner.session.prompt("Queue the second check behind it."));
+		const b = e7Start("e7-start-b-1");
+		expect(b.started).toBe(true);
+		expect(b.h, "the tool publishes B's queue state").toEqual(["QUEUED"]);
+		expect(b.text, "B waits behind A under the configured ceiling").toContain("capacity: 1 running of 1 allowed");
+		return b;
+	};
+	expect(e7StartA.started).toBe(true);
+	expect(e7StartA.h, "the running worker carries no queue state").toBeUndefined();
+	const e7StartB = await queueB();
 	const e7Runtime = e7Owner.session.backgroundLanes.getTaskRuntimeSnapshot();
 	if (e7Runtime === undefined) throw new Error("the auxiliary owner has no task runtime snapshot");
 	const e7AttemptOf = (laneId: string) =>
@@ -221,6 +259,10 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		grantId: undefined,
 		grant: undefined,
 	});
+	expect(e7BAttempt?.dispatch.objectiveRouteOrigin, "only the host-routed assignment has a route origin").toEqual(
+		world.systemOne.enabled ? origin : undefined,
+	);
+	expect(e7BAttempt?.firstStartedAt, "queued B has no durable start at the cut").toBeUndefined();
 	const e7BClaim = e7PreCutWorkers.ownedProjectClaims.find(
 		(claim) => claim.sessionId === e7Runtime.agents[e7StartB.agentId]?.resumeContext.sessionId,
 	);
@@ -270,6 +312,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		}),
 	);
 	const e7Capture = e7Manifest();
+	const routeCut = world.systemOne.enabled ? world.guard.snapshotSqlite() : false;
 	// Native facts before the cut: each binding is busy, and each birth reference names a file the manifest captured.
 	for (const [agentId, native] of e7Native) {
 		expect(native.binding?.ownership.state, `${agentId}'s native project-context binding is busy`).toBe("busy");
@@ -298,7 +341,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		}
 	}
 	// Physical clean disposal releases all owner claims. The crash cut then restores the PRE-CUT busy
-	// files, preserving A's unsafe-recovery refusal; SQLite is not rewound.
+	// files, preserving A's unsafe-recovery refusal. The routed profile restores the decision ledger at the queued cut.
 	world.systemOne.enterPhase("e7-resume", e7Judgments, {
 		expect: expectOwnerWords({
 			sessionManager: () => e7Fresh.sessionManager,
@@ -310,7 +353,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		owner: e7Owner.session,
 		sessionFile: e7AuxFile,
 		cut: { manifest: e7Manifest, capture: e7Capture },
-		rewindSqlite: false,
+		rewindSqlite: routeCut,
 		retainedClaims: [],
 		check: crashCutChecks("the auxiliary owner disposes cleanly"),
 	});
@@ -423,6 +466,16 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		status: "completed",
 		dispatch: e7BAttempt?.dispatch,
 	});
+	expect(
+		e7BReceipt?.firstStartedAt,
+		"the recovered scheduler committed the start that produced B's report",
+	).toBeDefined();
+	if (world.systemOne.enabled) {
+		const decisions = e7Fresh.session.getDecisionLedger()?.recentRoutes(sessionId, objectiveId, 8);
+		const recovered = decisions?.filter((row) => row.cycleId === route.cycle_id);
+		expect(recovered, "recovery credits the pre-crash decision without another objective cycle").toHaveLength(1);
+		expect(recovered?.[0]?.executor).toBe("worker");
+	}
 	// Post-birth native control through the public seam: the recovered owner admits one follow-up to B with an explicit replay key,
 	// a thread, and an expected reply. B's turn is held after the control is delivered; B's answer is then recorded through the public
 	// reply path against the admitted message; only then is B released. Its handoff must name the admitted lane, and replaying the same

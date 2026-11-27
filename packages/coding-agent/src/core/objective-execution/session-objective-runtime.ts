@@ -12,20 +12,24 @@
 import { execFileSync } from "node:child_process";
 import type { VerificationObligationView } from "../../kernel/verification-obligations.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
-import { reopenUnsupportedGoalCompletion } from "../goals/goal-acceptance.ts";
+import { reopenUnsupportedGoalCompletion, requirementKey } from "../goals/goal-acceptance.ts";
+import { goalExecutorScopeKey } from "../goals/goal-executor-refusal.ts";
 import { type GoalStateRevision, getGoalStateRevision } from "../goals/goal-lifecycle.ts";
-import type { GoalState } from "../goals/goal-state.ts";
+import { applyGoalEvent, type GoalState } from "../goals/goal-state.ts";
+import { currentGoalRequirements } from "../goals/requirement-proof.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import { assertCurrentGoalObjective } from "./current-objective-execution.ts";
 import type { RepairWork } from "./objective-repair-work.ts";
+import type { ObjectiveRoute, ObjectiveTerminalResult } from "./objective-route.ts";
 import type { StallEvaluation } from "./objective-stall-fingerprint.ts";
 
 export interface SessionObjectiveRuntimeDeps {
 	readonly runtime: DurableTaskRuntime;
 	readonly cwd: string;
 	getGoalState(): GoalState | undefined;
+	assertGoalIdentity?(goal: GoalState): void;
 	/** Projects the goal into its durable objective (requirements, evidence, status). */
 	synchronizeGoalState(goal: GoalState): void;
 	/** Persists a goal the objective side reopened, such as a completion its trusted evidence does not support. */
@@ -65,6 +69,7 @@ export class SessionObjectiveRuntime {
 	/** The goal owning `objectiveId`, when the live goal is that objective. */
 	private goalFor(objectiveId: string): GoalState | undefined {
 		const goal = this.deps.getGoalState();
+		if (goal && goalObjectiveId(goal.goalId) === objectiveId) this.deps.assertGoalIdentity?.(goal);
 		return goal && goalObjectiveId(goal.goalId) === objectiveId ? goal : undefined;
 	}
 
@@ -94,7 +99,56 @@ export class SessionObjectiveRuntime {
 	}
 
 	assertExecutionCurrent(objectiveId: string): void {
-		assertCurrentGoalObjective(objectiveId, this.deps.getGoalState());
+		assertCurrentGoalObjective(objectiveId, this.goalFor(objectiveId) ?? this.deps.getGoalState());
+	}
+
+	/** Persist the exact requested scope before returning a nonterminal admission disposition. */
+	recordExecutorRefusal(
+		objectiveId: string,
+		route: ObjectiveRoute,
+		reasons: readonly string[],
+	): ObjectiveTerminalResult | undefined {
+		this.assertExecutionCurrent(objectiveId);
+		const goal = this.goalFor(objectiveId);
+		if (!goal) return undefined;
+		const requested = route.target_requirement_ids;
+		const open = currentGoalRequirements(goal).filter((item) => item.status === "open");
+		const scoped = requested?.length && requested.every((id) => open.some((item) => item.id === id));
+		const requirements = scoped ? open.filter((item) => requested.includes(item.id)) : [];
+		const now = new Date();
+		let basis = goal;
+		for (const item of requirements) {
+			if (goal.requirements.find((requirement) => requirement.id === item.id)?.status === "satisfied") {
+				basis = applyGoalEvent(basis, { type: "reopen_requirement", id: item.id, now: now.toISOString() });
+			}
+		}
+		const next = applyGoalEvent(basis, {
+			type: "executor_refused",
+			...(requirements.length === 0 ? { scopeKey: goalExecutorScopeKey(goal) } : {}),
+			ids: requirements.map((item) => item.id),
+			definitions: requirements.map(requirementKey),
+			reason: reasons.join(", ").slice(0, 500),
+			retryAt: new Date(now.getTime() + 60_000).toISOString(),
+			now: now.toISOString(),
+		});
+		this.deps.saveGoalState(next, getGoalStateRevision(goal));
+		const exhausted =
+			next.status === "blocked" ||
+			requirements.some(
+				(item) => next.requirements.find((entry) => entry.id === item.id)?.executorRefusal?.attempts === 3,
+			);
+		this.deps.emitWarning(
+			`The requested executor declined ${requirements.map((item) => item.id).join(", ") || objectiveId}. ${exhausted ? "Three admissions were refused. This scope now needs an executor or requirement change." : `This scope is eligible for another admission after ${new Date(now.getTime() + 60_000).toISOString()}.`}`,
+		);
+		return {
+			status: "executor_unavailable",
+			reasonCodes: [
+				...reasons,
+				...(requirements.length === 0 && next.executorRefusal?.attempts === 1
+					? ["executor_scope_replan_required"]
+					: []),
+			],
+		};
 	}
 
 	isCancelled(objectiveId: string): boolean {

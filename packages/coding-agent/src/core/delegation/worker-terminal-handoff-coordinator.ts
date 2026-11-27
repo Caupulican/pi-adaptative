@@ -24,7 +24,7 @@ export interface WorkerTerminalHandoff {
  * character can serialize to six JSON bytes. `waitReason` is process-local queue state that a terminal
  * record never carries, `outcomeText` is display text re-derived from the recorded outcome at each
  * projection (never retained), and `costUsd` is a number. With the three handoff identities, one entry holds at
- * most 11,001 code units, so the durable attempt cap bounds the outbox to about 5.4 MiB of string data.
+ * most 11,513 code units, so the durable attempt cap bounds the outbox to about 5.7 MiB of string data.
  */
 const LANE_RECORD_FIELD_MAX_CHARS: Readonly<
 	Record<Exclude<keyof LaneRecord, "waitReason" | "costUsd" | "outcomeText">, number>
@@ -41,6 +41,7 @@ const LANE_RECORD_FIELD_MAX_CHARS: Readonly<
 	reasonDetail: MAX_RETAINED_DIAGNOSTIC_CHARS,
 	queuedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	startedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	firstStartedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	completedAt: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	goalId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	evidenceEntryId: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,

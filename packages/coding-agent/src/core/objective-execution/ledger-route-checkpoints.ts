@@ -6,30 +6,84 @@
  */
 
 import type { DecisionLedgerStore } from "../operator-projection/decision-ledger-store.ts";
+import {
+	reconcileArchivedWorkerRouteStarts,
+	reconcileWorkerRouteStarts,
+} from "../operator-projection/worker-route-starts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
-import type { ObjectiveRoute } from "./objective-route.ts";
+import { OBJECTIVE_WAIT_ROUTES, type ObjectiveRoute, SCOPE_REPLAN_EXECUTOR } from "./objective-route.ts";
 import { type RouteHistoryEntry, repeatedRouteCount } from "./objective-route-projector.ts";
-import type { StallEvaluation } from "./objective-stall-fingerprint.ts";
+import { evidenceMarkerOf, ObjectiveStallDetector, type StallEvaluation } from "./objective-stall-fingerprint.ts";
 
 export interface LedgerRouteCheckpointsDeps {
 	getLedger(): DecisionLedgerStore | undefined;
 	readonly sessionId: string;
 	readonly cwd: string;
+	readonly eventStoreRoot?: string;
 	getSnapshot(): TaskRuntimeProjection | undefined;
 	now?(): number;
 }
 
-/** Objective evidence plus tasks plus attempts: any real progress moves it, a repeated route does not. */
-export function evidenceMarkerOf(snapshot: TaskRuntimeProjection | undefined, objectiveId: string): number {
-	if (!snapshot) return 0;
-	const objective = snapshot.objectives[objectiveId];
-	const tasks = Object.values(snapshot.tasks).filter((task) => task.task.objectiveId === objectiveId);
-	const attempts = tasks.reduce((sum, task) => sum + task.attemptIds.length, 0);
-	return (objective?.evidence.length ?? 0) * 1000 + tasks.length * 10 + attempts;
+/** The route and measured work identity captured at decision time. */
+export function routeHistoryEntry(
+	route: ObjectiveRoute,
+	runtime: TaskRuntimeProjection | undefined,
+): RouteHistoryEntry {
+	return {
+		route: route.route,
+		reasonCodes: route.reason_codes,
+		evidenceMarker: evidenceMarkerOf(runtime, route.objective_id),
+		workKey: ObjectiveStallDetector.computeStrategyFingerprint({
+			route: route.route,
+			targetRequirementIds: route.target_requirement_ids,
+			targetHypothesisIds: route.target_hypothesis_ids,
+		}),
+	};
+}
+
+/** A scope refusal can submit a root replan in the same decision cycle. Keep the executed work distinct. */
+function executedStrategy(entry: RouteHistoryEntry, executor?: string): RouteHistoryEntry {
+	if (executor === SCOPE_REPLAN_EXECUTOR)
+		return {
+			route: "replan",
+			reasonCodes: ["executor_scope_replan_required"],
+			evidenceMarker: entry.evidenceMarker,
+			workKey: ObjectiveStallDetector.computeStrategyFingerprint({ route: "replan", targetRequirementIds: [] }),
+			executor,
+		};
+	return executor ? { ...entry, executor } : entry;
+}
+
+/** Fallback for SDK controllers without a history store. Preserve the same measured strategy rows. */
+export class LocalRouteHistory {
+	private readonly rows: { objectiveId: string; cycleId: string; entry: RouteHistoryEntry }[] = [];
+
+	recent(objectiveId: string, limit: number): readonly RouteHistoryEntry[] {
+		return this.rows
+			.filter((row) => row.objectiveId === objectiveId)
+			.slice(-limit)
+			.map((row) => row.entry);
+	}
+
+	record(route: ObjectiveRoute, runtime: TaskRuntimeProjection, executor: string): void {
+		if (OBJECTIVE_WAIT_ROUTES.includes(route.route)) return;
+		const prior = this.rows.find((row) => row.cycleId === route.cycle_id);
+		if (prior) {
+			prior.entry = executedStrategy(prior.entry, executor);
+			return;
+		}
+		this.rows.push({
+			objectiveId: route.objective_id,
+			cycleId: route.cycle_id,
+			entry: executedStrategy(routeHistoryEntry(route, runtime), executor),
+		});
+		if (this.rows.length > 20) this.rows.shift();
+	}
 }
 
 export class LedgerRouteCheckpoints {
 	private readonly deps: LedgerRouteCheckpointsDeps;
+	private readonly reconciledSnapshots = new WeakMap<TaskRuntimeProjection, DecisionLedgerStore>();
 
 	constructor(deps: LedgerRouteCheckpointsDeps) {
 		this.deps = deps;
@@ -41,25 +95,42 @@ export class LedgerRouteCheckpoints {
 			cwd: this.deps.cwd,
 			objectiveId: route.objective_id,
 			cycleId: route.cycle_id,
-			route: route.route,
-			reasonCodes: route.reason_codes,
 			decidedAt: (this.deps.now ?? Date.now)(),
-			evidenceMarker: evidenceMarkerOf(this.deps.getSnapshot(), route.objective_id),
+			...routeHistoryEntry(route, this.deps.getSnapshot()),
 		});
 	}
 
 	async recordRouteOutcome(route: ObjectiveRoute, executor: string): Promise<void> {
-		this.deps.getLedger()?.noteRouteExecutor(this.deps.sessionId, route.cycle_id, executor);
+		this.deps.getLedger()?.noteRouteExecutor(this.deps.sessionId, route.cycle_id, executor, route.objective_id);
 	}
 
 	async recentRoutes(objectiveId: string, limit: number): Promise<readonly RouteHistoryEntry[]> {
-		const rows = this.deps.getLedger()?.recentRoutes(this.deps.sessionId, objectiveId, limit) ?? [];
-		return rows.map((row) => ({
-			route: row.route,
-			reasonCodes: row.reasonCodes,
-			evidenceMarker: row.evidenceMarker,
-			...(row.executor ? { executor: row.executor } : {}),
-		}));
+		const ledger = this.deps.getLedger();
+		if (!ledger) return [];
+		const snapshot = this.deps.getSnapshot();
+		if (snapshot && this.reconciledSnapshots.get(snapshot) !== ledger) {
+			reconcileWorkerRouteStarts(this.deps.sessionId, snapshot, () => ledger);
+			if (this.deps.eventStoreRoot)
+				reconcileArchivedWorkerRouteStarts(
+					this.deps.sessionId,
+					this.deps.eventStoreRoot,
+					snapshot.retentionArchiveIds,
+					() => ledger,
+				);
+			this.reconciledSnapshots.set(snapshot, ledger);
+		}
+		const rows = ledger.recentRoutes(this.deps.sessionId, objectiveId, limit, true);
+		return rows.map((row) =>
+			executedStrategy(
+				{
+					route: row.route,
+					reasonCodes: row.reasonCodes,
+					evidenceMarker: row.evidenceMarker,
+					workKey: row.workKey,
+				},
+				row.executor,
+			),
+		);
 	}
 
 	/**
@@ -68,16 +139,19 @@ export class LedgerRouteCheckpoints {
 	 */
 	async evaluate(objectiveId: string): Promise<StallEvaluation> {
 		const history = await this.recentRoutes(objectiveId, 8);
-		const repeated = repeatedRouteCount(history);
-		const last = history.at(-1);
-		const waiting = last?.route === "wait_for_worker" || last?.route === "wait_for_tool";
-		const stalled = !waiting && repeated >= 2;
-		return {
-			stalled,
-			stallTurns: stalled ? repeated - 1 : 0,
-			repeatedWithoutNewEvidence: stalled,
-			fingerprint: last ? `${last.route}:${last.reasonCodes.join(",")}:${last.evidenceMarker}` : "init",
-			...(stalled ? { reason: `route ${last?.route} repeated ${repeated} times without new evidence` } : {}),
-		};
+		return evaluateRouteHistory(history, evidenceMarkerOf(this.deps.getSnapshot(), objectiveId));
 	}
+}
+
+export function evaluateRouteHistory(history: readonly RouteHistoryEntry[], marker: number): StallEvaluation {
+	const repeated = repeatedRouteCount(history, marker);
+	const last = history.findLast((entry) => !OBJECTIVE_WAIT_ROUTES.includes(entry.route));
+	const stalled = repeated >= 2;
+	return {
+		stalled,
+		stallTurns: stalled ? repeated - 1 : 0,
+		repeatedWithoutNewEvidence: stalled,
+		fingerprint: last ? `${last.workKey ?? last.route}:${last.evidenceMarker}` : "init",
+		...(stalled ? { reason: `route ${last?.route} repeated ${repeated} times without new evidence` } : {}),
+	};
 }

@@ -35,6 +35,7 @@ import type {
 import type { Static, TSchema } from "typebox";
 import type {
 	AgentMessage,
+	AgentTool,
 	AgentToolFailureRecoveryContract,
 	AgentToolInvocation,
 	AgentToolResult,
@@ -503,7 +504,7 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 * wasted. Undeclared tools stay resident only while the resident schema budget has room.
 	 */
 	neverDefer?: boolean;
-	executionMode?: ToolExecutionMode;
+	executionMode?: AgentTool["executionMode"];
 
 	/**
 	 * True when this call blocks by the caller's own request (a wait on a worker, a task, a reply).

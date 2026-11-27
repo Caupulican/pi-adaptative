@@ -77,3 +77,47 @@ export function buildCompletionProof(execState: ExecutionState, snapshot: Candid
 		gates,
 	};
 }
+
+export interface TerminalCompletionOptions {
+	readonly signal?: AbortSignal;
+	readonly assertCurrent?: () => void;
+}
+
+export interface TerminalCompletionProof {
+	readonly objectiveId: string;
+	readonly candidateDigest: string;
+	readonly ownerCorrectionEntryId?: string;
+	readonly deliveryCertificateId?: string;
+	readonly finalCommit?: string;
+	readonly pushRefs?: readonly string[];
+}
+
+export class TerminalCompletionConflictError extends Error {
+	readonly reason: "conflict" | "invalid_phase" | "empty_proof";
+
+	constructor(reason: "conflict" | "invalid_phase" | "empty_proof") {
+		super(`Terminal completion rejected: ${reason}`);
+		this.name = "TerminalCompletionConflictError";
+		this.reason = reason;
+	}
+}
+
+/** The terminal hook refused or failed before complete was stored. The store is unchanged. */
+export class TerminalHookRejectedError extends Error {
+	constructor(detail: string) {
+		super(detail || "terminal_hook_rejected");
+		this.name = "TerminalHookRejectedError";
+	}
+}
+
+export function terminalProofRef(input: TerminalCompletionProof): string {
+	if (!input.objectiveId.trim() || !input.candidateDigest.trim()) return "";
+	const ref = [
+		input.objectiveId,
+		input.candidateDigest,
+		input.deliveryCertificateId ?? "",
+		input.finalCommit ?? "",
+		...(input.pushRefs ?? []),
+	].join("\n");
+	return input.ownerCorrectionEntryId ? JSON.stringify([input.ownerCorrectionEntryId, ref]) : ref;
+}

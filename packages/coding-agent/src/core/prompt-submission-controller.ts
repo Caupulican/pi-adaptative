@@ -135,6 +135,7 @@ export interface PromptSubmissionControllerDeps extends OwnerGoalIntentPorts {
 		| "applyDeliveredOwnerPrompt"
 		| "beginExecution"
 		| "setStartAuthority"
+		| "getCompletionPresentationSignal"
 		| "assertExecutionGoalCurrent"
 		| "getState"
 		| "startJudgedOwnerGoal"
@@ -1252,14 +1253,8 @@ export class PromptSubmissionController {
 
 		if (!messages) return;
 
-		// The submission's cancellation point. Listener FIRST, then the `aborted` read: in that order an abort either
-		// arrives later and reaches the live run through the listener, or has already arrived and is caught by the read —
-		// there is no gap between them for one to fall into. Reversed, an abort landing between the read and the attach
-		// would be dropped and the turn would run anyway. The listener is the same edge as `abort()`: a run in flight is
-		// unwound by its own controller, and a retry backoff in flight is cut rather than waited out. What the listener
-		// cannot reach is a run that does not exist yet — the drive loop still has its own preparation to await before
-		// entering one — so the signal also rides into `runRoutedTurn` and is read once more immediately before the run
-		// starts (see ForegroundRecoveryController.runAgentExecution). That read is the closing gate.
+		// Attach before checking cancellation. The drive checks this same signal again immediately before
+		// starting the agent, covering the remaining gap between submission preparation and the run.
 		let releaseSubmissionSignal: (() => void) | undefined;
 		if (submissionSignal)
 			releaseSubmissionSignal = this.deps.foregroundRecovery.bindSubmissionSignal(submissionSignal);
@@ -1366,39 +1361,41 @@ export class PromptSubmissionController {
 					false,
 					submissionSignal,
 				);
+				const presentation = this.deps.goals.getCompletionPresentationSignal();
+				const postflightSignal =
+					submissionSignal && presentation
+						? AbortSignal.any([submissionSignal, presentation])
+						: (submissionSignal ?? presentation);
+				if (postflightSignal?.aborted) return;
 				// The answer's claims and the objective's postflight read different facts and write nothing
 				// the other reads, so they wait on System One together, not one after the other.
-				const claimCheck = submissionSignal?.aborted ? undefined : this.deps.claimCorrection(turnOpening);
+				const claimCheck = this.deps.claimCorrection(turnOpening);
 				// Observe immediately and join before releasing the submission even if postflight is interrupted.
 				const claimSettlement = Promise.allSettled([claimCheck]);
 				let postflightFailure: { readonly error: unknown } | undefined;
 				try {
-					if (this.deps.getSystemOneController() && !submissionSignal?.aborted) {
+					if (this.deps.getSystemOneController() && !postflightSignal?.aborted) {
 						await this.deps.runtimeBuilder.withTaskDirectoryContext(
 							() => {
+								if (postflightSignal?.aborted) return;
 								this.deps.goals.assertExecutionGoalCurrent();
 								return executeSystemOnePostflight(
 									this.deps.getSystemOneController(),
 									this.deps.agent.state.messages.length,
-									submissionSignal?.aborted,
+									postflightSignal?.aborted,
 								);
 							},
-							submissionSignal,
+							postflightSignal,
 							(error) => {
 								noteTaskDirectoryUnavailable(error);
 							},
-						);
-					} else {
-						await executeSystemOnePostflight(
-							undefined,
-							this.deps.agent.state.messages.length,
-							submissionSignal?.aborted,
 						);
 					}
 				} catch (error) {
 					postflightFailure = { error };
 				}
 				const [claimResult] = await claimSettlement;
+				if (presentation?.aborted) return;
 				if (postflightFailure) {
 					const error = postflightFailure.error;
 					if (claimResult.status === "rejected") {
@@ -1423,21 +1420,21 @@ export class PromptSubmissionController {
 					}
 					throw error;
 				}
-				if (claimResult.status === "rejected" && !submissionSignal?.aborted) throw claimResult.reason;
+				if (claimResult.status === "rejected" && !postflightSignal?.aborted) throw claimResult.reason;
 				// Claims against deliveries: a contradicted claim buys one correction turn, never a loop.
-				if (claimCheck && claimResult.status === "fulfilled" && !submissionSignal?.aborted) {
+				if (claimCheck && claimResult.status === "fulfilled" && !postflightSignal?.aborted && !presentation) {
 					const correction = claimResult.value;
-					if (correction && !submissionSignal?.aborted) {
+					if (correction && !postflightSignal?.aborted) {
 						await this.deps.modelRouter.runRoutedTurn(
 							[createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString())],
 							routedTurnModel,
 							routedTurnRouteDecision,
 							false,
 							false,
-							submissionSignal,
+							postflightSignal,
 						);
 					}
-					if (!submissionSignal?.aborted) await this.deps.flushOwnerItems(submission.lease);
+					if (!postflightSignal?.aborted) await this.deps.flushOwnerItems(submission.lease);
 				}
 			}
 			// A cancelled submission records no outcome. Cancelled before the run, the last assistant

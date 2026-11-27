@@ -614,6 +614,12 @@ export class CompactionController {
 	 * says why.
 	 */
 	private compactionScope(): CompactionScope {
+		if (this.deps.sessionManager.getActiveParentInputWake()?.window?.hasExcludedHistory)
+			return {
+				kind: "none",
+				reason:
+					"this background retry excludes earlier conversation entries that a contiguous checkpoint would replace",
+			};
 		const wire = this.deps.getContinuousChatWire?.();
 		if (wire === undefined) return { kind: "session" };
 		if (wire.kind === "blocked") {
@@ -745,7 +751,7 @@ export class CompactionController {
 	 * restate, so the summarizer reads the turn's messages alone after the lane's system prompt and tools.
 	 */
 	private summarizerReadsSentPrefix(): boolean {
-		return !this.isContinuousChatActive();
+		return !this.isContinuousChatActive() && !this.deps.sessionManager.getParentCompactionInputs().hasHiddenInputs;
 	}
 
 	/** What a summarizer reads, for capacity checks: the running turn's own messages under ICM, else the live context. */
@@ -851,6 +857,7 @@ export class CompactionController {
 		const scope = this.compactionScope();
 		const preparation = prepareCompaction(sourceBranch, settings, {
 			...options,
+			parentInputs: this.deps.sessionManager.getParentCompactionInputs(),
 			projectOwnerHistory: this.deps.projectOwnerHistory,
 			...(scope.kind === "turn" ? { retainedEntryId: scope.startEntryId } : {}),
 			...(activeTask ? { activeTask } : {}),
@@ -934,9 +941,11 @@ export class CompactionController {
 		const source =
 			scope.kind === "session" ? this.deps.sessionManager.getBranch() : scope.kind === "turn" ? scope.entries : [];
 		const compactableBranch: ReturnType<SessionManager["getBranch"]> = [];
+		const inputs = this.deps.sessionManager.getParentCompactionInputs();
 		let retainedParentId: string | null = null;
-		for (const entry of source) {
-			if (isSessionLifecycleEntry(entry)) continue;
+		for (const saved of source) {
+			if (isSessionLifecycleEntry(saved)) continue;
+			const entry = inputs.project(saved);
 			compactableBranch.push(
 				entry.parentId === retainedParentId ? entry : ({ ...entry, parentId: retainedParentId } as typeof entry),
 			);
@@ -2521,7 +2530,12 @@ export class CompactionController {
 	}
 
 	private idlePreparationKey(settings: CompactionSettings): string {
-		return JSON.stringify({ settings, compactionModel: this.deps.getCompactionModelSetting() });
+		// Speculative summaries prepared before held-note filtering must be rebuilt from the canonical inputs.
+		return JSON.stringify({
+			settings,
+			compactionModel: this.deps.getCompactionModelSetting(),
+			parentInputProjection: 1,
+		});
 	}
 
 	/**

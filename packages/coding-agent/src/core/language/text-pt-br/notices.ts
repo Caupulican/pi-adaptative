@@ -262,10 +262,10 @@ export const NOTICES = {
 	},
 	heldDraft: (classes: string, origin: string, grants: string) => ({
 		head: "Retida, não executada: ",
-		tail: ` (${classes}), pedida por ${origin}. Ela roda se você mesmo pedir${grants === "" ? "" : `; ${grants} permite que execuções assim a façam`}.`,
+		tail: ` (${classes}), pedida por ${origin}. Peça a ação explicitamente para iniciar uma nova chamada${grants === "" ? "" : `; ${grants} permite chamadas futuras`}.`,
 	}),
 	heldDraftsFull: (origin: string, max: number) =>
-		`Retidas, não executadas: ações pedidas por ${origin}; ${max} ações retidas já esperam por você, então nenhuma outra é registrada. Elas rodam se você mesmo pedir.`,
+		`Retidas, não executadas: ações pedidas por ${origin}; ${max} ações retidas já esperam por você, então nenhuma outra é registrada. Peça a ação explicitamente para iniciar uma nova chamada.`,
 
 	subscriptionUsage: {
 		window: (percent: number) => `uma janela de uso está em ${percent}%`,

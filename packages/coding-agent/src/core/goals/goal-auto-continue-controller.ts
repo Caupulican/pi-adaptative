@@ -29,7 +29,8 @@ function isDeadlineWait(continuation: GoalRuntimeSnapshot["continuation"]): bool
 		continuation.action === "waiting" &&
 		(continuation.reasonCode === "worker_in_flight" ||
 			continuation.reasonCode === "plan_in_flight" ||
-			continuation.reasonCode === "watch_in_flight") &&
+			continuation.reasonCode === "watch_in_flight" ||
+			continuation.reasonCode === "executor_admission_backoff") &&
 		continuation.resumeAt !== undefined
 	);
 }

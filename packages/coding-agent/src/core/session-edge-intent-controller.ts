@@ -10,7 +10,6 @@ import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { AgentToolPolicyDeniedError } from "../kernel/types.ts";
 import {
-	appendOutwardDraftReleased,
 	type EdgeCall,
 	type EdgeGrantDetails,
 	edgeRecordsOnBranch,
@@ -21,7 +20,6 @@ import {
 	ownerDraftView,
 	recordEdgeGrant,
 	recordEdgeRevoke,
-	releaseOutwardDrafts,
 	remoteOwnerEdgeGrants,
 	remoteOwnerRunGrants,
 	type SessionEdgeDeps,
@@ -35,6 +33,7 @@ import {
 	type EdgeGrantView,
 } from "./autonomy/edge-policy.ts";
 import { thirdPartyProtectedWritePaths } from "./autonomy/lane-private-paths.ts";
+import { appendOutwardDraftReleased, registerOutwardDraftRelease } from "./autonomy/owner-draft-decisions.ts";
 import type { WorkerEdgeSource } from "./delegation/worker-edge-policy.ts";
 import type { ToolInfo } from "./extensions/index.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
@@ -615,8 +614,8 @@ export class SessionEdgeIntentController {
 					this.deps.ownerChannel?.presentOwnerDraft?.(ownerDraftView({ record: held.added, state: "pending" }));
 				return { ...(held.kept ? { id: held.id } : {}), ...(held.state ? { state: held.state } : {}), told };
 			},
-			releaseOutward: (toolName, operations) =>
-				releaseOutwardDrafts(this.deps.getSessionManager(), toolName, operations),
+			registerOutwardRelease: (call, operations, start) =>
+				registerOutwardDraftRelease(this.deps.getSessionManager(), call, operations, start),
 			isOwnerChannelLive: (origin) => this.deps.ownerChannel?.isOwnerChannelLive?.(origin) === true,
 			isOwnerChannelFull: (origin) => this.deps.ownerChannel?.isOwnerChannelFull?.(origin) === true,
 			ownerChannelSender: (origin) => this.deps.ownerChannel?.ownerChannelSender?.(origin),

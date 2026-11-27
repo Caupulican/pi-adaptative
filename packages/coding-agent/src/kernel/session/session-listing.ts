@@ -10,7 +10,12 @@ import type { AgentMessage } from "../types.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { isSessionLifecycleEntry } from "./lifecycle-ledger.ts";
 import { getDefaultSessionDir, getDefaultSessionDirCandidates } from "./session-default-dirs.ts";
-import { QUEUED_INPUT_CUSTOM_TYPE, type SessionMessageEntry } from "./session-entries.ts";
+import {
+	GOAL_OWNER_CORRECTION_CUSTOM_TYPE,
+	GOAL_STATE_CUSTOM_TYPE,
+	QUEUED_INPUT_CUSTOM_TYPE,
+	type SessionMessageEntry,
+} from "./session-entries.ts";
 import {
 	getSessionHeaderCwd,
 	parseSessionEntryLine,
@@ -351,7 +356,10 @@ export function requiresSessionFile(entry: FileEntry): boolean {
 				entry.message.role === "bashExecution")) ||
 		isSessionLifecycleEntry(entry) ||
 		(entry.type === "custom" &&
-			(entry.customType === QUEUED_INPUT_CUSTOM_TYPE || entry.customType === "continuous_chat_work_report"))
+			(entry.customType === QUEUED_INPUT_CUSTOM_TYPE ||
+				entry.customType === "continuous_chat_work_report" ||
+				entry.customType === GOAL_STATE_CUSTOM_TYPE ||
+				entry.customType === GOAL_OWNER_CORRECTION_CUSTOM_TYPE))
 	);
 }
 

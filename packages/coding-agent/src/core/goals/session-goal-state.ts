@@ -6,6 +6,9 @@ import {
 } from "../session-snapshot.ts";
 import { deepFreeze } from "../util/deep-freeze.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { assertGoalIdentityAvailable, GOAL_STATE_CUSTOM_TYPE, goalIdentityConflict } from "./goal-journal-identity.ts";
+import { recoverLegacyGoalCorrection } from "./goal-legacy-correction.ts";
+import { getGoalStateRevision, matchesGoalStateRevision } from "./goal-lifecycle.ts";
 import {
 	applyGoalEvent,
 	cloneGoalEventForStorage,
@@ -13,11 +16,16 @@ import {
 	type GoalEvent,
 	type GoalState,
 	isGoalEvent,
+	isGoalExecutionActive,
 	isGoalState,
 	MAX_GOAL_EVENT_HISTORY,
 } from "./goal-state.ts";
 
-export const GOAL_STATE_CUSTOM_TYPE = "goal_state";
+export {
+	assertGoalIdentityUnambiguous,
+	GOAL_STATE_CUSTOM_TYPE,
+	goalIdentityConflict,
+} from "./goal-journal-identity.ts";
 
 export type GoalStateSnapshotPayload = SessionSnapshotPayload<"state", GoalState>;
 
@@ -29,6 +37,7 @@ const GOAL_STATE_SNAPSHOT_CODEC: SessionSnapshotCodec<GoalState, "state"> = {
 };
 
 interface GoalEventBatchPayload {
+	proofLifecycle?: "current";
 	version: 2;
 	kind: "events";
 	goalId: string;
@@ -39,6 +48,7 @@ interface GoalEventBatchPayload {
 interface GoalCheckpointPayload {
 	version: 2;
 	kind: "checkpoint";
+	opensWorkUnit?: true;
 	state: GoalState;
 }
 
@@ -60,7 +70,12 @@ export function decodeGoalJournalPayload(data: unknown): GoalJournalPayload | un
 	if (!isPlainRecord(data) || data.version !== 2 || typeof data.kind !== "string") return undefined;
 	if (data.kind === "checkpoint") {
 		if (!isGoalState(data.state)) return undefined;
-		return { version: 2, kind: "checkpoint", state: cloneGoalStateForStorage(data.state) };
+		return {
+			version: 2,
+			kind: "checkpoint",
+			...(data.opensWorkUnit === true ? { opensWorkUnit: true as const } : {}),
+			state: cloneGoalStateForStorage(data.state),
+		};
 	}
 	if (data.kind === "cleared") {
 		if (
@@ -78,7 +93,8 @@ export function decodeGoalJournalPayload(data: unknown): GoalJournalPayload | un
 			clearedAt: data.clearedAt,
 		};
 	}
-	if (data.kind !== "events") return undefined;
+	if (data.kind !== "events" || (data.proofLifecycle !== undefined && data.proofLifecycle !== "current"))
+		return undefined;
 	if (
 		typeof data.goalId !== "string" ||
 		!isNonNegativeInteger(data.baseRevision) ||
@@ -92,6 +108,7 @@ export function decodeGoalJournalPayload(data: unknown): GoalJournalPayload | un
 	return {
 		version: 2,
 		kind: "events",
+		proofLifecycle: data.proofLifecycle,
 		goalId: data.goalId,
 		baseRevision: data.baseRevision,
 		events: data.events.map(cloneGoalEventForStorage),
@@ -104,17 +121,27 @@ export function decodeGoalJournalPayload(data: unknown): GoalJournalPayload | un
  * recursive full-state-on-every-mutation growth while keeping compound owner transitions atomic.
  */
 export function appendGoalStateSnapshot(
-	sessionManager: Pick<SessionManager, "appendCustomEntry">,
+	sessionManager: Pick<SessionManager, "appendCustomEntry" | "getEntries" | "getLatestCustomEntryOnBranch">,
 	state: GoalState,
 	previous?: GoalState,
+	admission?: {
+		hasDurableObjective(goalId: string): boolean;
+	},
 ): string {
+	const current = getLatestGoalStateSnapshot(sessionManager);
+	assertGoalIdentityAvailable(sessionManager, state, current, admission?.hasDurableObjective);
+	previous ??= current;
 	const revision = state.revision ?? 0;
 	const previousRevision = previous?.revision ?? 0;
-	const eventCount = previous && previous.goalId === state.goalId ? revision - previousRevision : 0;
+	const eventCount =
+		previous && previous.goalId === state.goalId && previous.createdAt === state.createdAt
+			? revision - previousRevision
+			: 0;
 	if (previous && eventCount > 0 && eventCount <= state.events.length && eventCount <= MAX_GOAL_EVENT_HISTORY) {
 		const payload: GoalEventBatchPayload = {
 			version: 2,
 			kind: "events",
+			proofLifecycle: "current",
 			goalId: state.goalId,
 			baseRevision: previousRevision,
 			events: state.events.slice(-eventCount).map(cloneGoalEventForStorage),
@@ -122,18 +149,49 @@ export function appendGoalStateSnapshot(
 		const entryId = sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
 		// The journal's newest entry now stands for exactly this state: prime the reader's cache so the
 		// next read does not reconstruct what was just written.
-		cacheGoalState(sessionManager, entryId, state);
+		cacheGoalState(sessionManager, entryId, state, sessionManager);
 		return entryId;
 	}
 
 	const payload: GoalCheckpointPayload = {
 		version: 2,
 		kind: "checkpoint",
+		...(admission && current?.goalId !== state.goalId && isGoalExecutionActive(state.status)
+			? { opensWorkUnit: true as const }
+			: {}),
 		state: cloneGoalStateForStorage(state),
 	};
 	const entryId = sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
-	cacheGoalState(sessionManager, entryId, state);
+	cacheGoalState(sessionManager, entryId, state, sessionManager);
 	return entryId;
+}
+
+/** Clearing an ambiguous allocation retires its goal record without cancelling another lifetime's objective. */
+export function clearGoalStateJournal(
+	source: Pick<SessionManager, "appendCustomEntry" | "getLatestCustomEntryOnBranch" | "getEntries">,
+	state: GoalState,
+	now: string,
+	synchronize: (state: GoalState) => void,
+): string {
+	if (!matchesGoalStateRevision(getLatestGoalStateSnapshot(source), getGoalStateRevision(state)))
+		throw new Error("Goal state changed concurrently; retry clear against the latest state.");
+	let settled = state;
+	if (!goalIdentityConflict(source, state)) {
+		let settledEntry = source.getLatestCustomEntryOnBranch(GOAL_STATE_CUSTOM_TYPE)?.id;
+		if (state.status !== "cancelled" && state.status !== "completed") {
+			settled = applyGoalEvent(state, { type: "cancel_goal", now });
+			settledEntry = appendGoalStateSnapshot(source, settled, state);
+		}
+		const assertCurrent = () => {
+			if (source.getLatestCustomEntryOnBranch(GOAL_STATE_CUSTOM_TYPE)?.id !== settledEntry)
+				throw new Error("Goal state changed during synchronization; retry clear against the latest state.");
+		};
+		assertCurrent();
+		// Keep the terminal record until its objective has reconciled, including a completion retried after a storage failure.
+		synchronize(settled);
+		assertCurrent();
+	}
+	return appendGoalClearedSnapshot(source, settled, now);
 }
 
 export function appendGoalClearedSnapshot(
@@ -149,7 +207,7 @@ export function appendGoalClearedSnapshot(
 		clearedAt,
 	};
 	const entryId = sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
-	cacheGoalState(sessionManager, entryId, undefined);
+	goalStateCache.delete(sessionManager);
 	return entryId;
 }
 
@@ -164,6 +222,33 @@ export function decodeGoalStateSnapshotPayload(data: unknown): GoalState | undef
 
 interface GoalStateSource {
 	getLatestCustomEntryOnBranch: SessionManager["getLatestCustomEntryOnBranch"];
+}
+
+/** A pruned host receipt stays consumed on the active branch's durable goal journal. */
+export function hasRecordedGoalEvidence(
+	sessionManager: GoalStateSource,
+	goal: Pick<GoalState, "goalId" | "createdAt">,
+	evidenceId: string,
+): boolean {
+	let entry = sessionManager.getLatestCustomEntryOnBranch(GOAL_STATE_CUSTOM_TYPE);
+	let batchFound = false;
+	while (entry) {
+		const legacy = decodeGoalStateSnapshotPayload(entry.data);
+		const journal = legacy ? undefined : decodeGoalJournalPayload(entry.data);
+		if (!legacy && !journal) throw new Error("Cannot verify a host receipt against malformed goal history.");
+		if (journal?.kind === "cleared") return false;
+		const checkpoint = legacy ?? (journal?.kind === "checkpoint" ? journal.state : undefined);
+		if (checkpoint) {
+			if (checkpoint.goalId !== goal.goalId || checkpoint.createdAt !== goal.createdAt) return false;
+			if (batchFound || checkpoint.evidence.some((evidence) => evidence.id === evidenceId)) return true;
+		} else if (journal?.kind === "events") {
+			if (journal.goalId !== goal.goalId) return false;
+			batchFound ||= journal.events.some((event) => event.type === "add_evidence" && event.id === evidenceId);
+		}
+		if (entry.parentId === null) return false;
+		entry = sessionManager.getLatestCustomEntryOnBranch(GOAL_STATE_CUSTOM_TYPE, entry.parentId);
+	}
+	return false;
 }
 
 interface GoalStateCacheEntry {
@@ -181,20 +266,53 @@ function cacheGoalState(
 	sessionManager: object,
 	latestEntryId: string | null,
 	state: GoalState | undefined,
+	source?: GoalStateSource,
 ): GoalState | undefined {
 	// One frozen value per journal position, shared by every reader: its identity changes exactly
 	// when the journal does, so a reader compares snapshots by identity instead of deep-comparing
 	// two fresh clones, and no reader pays a clone of every event per read.
-	const stored = state ? deepFreeze(cloneGoalStateForStorage(state)) : undefined;
+	const authoritative =
+		source && state && state.ownerActivatedAt === undefined
+			? recoverLegacyGoalCorrection(source, state, latestEntryId ?? undefined)
+			: state;
+	const stored = authoritative ? deepFreeze(cloneGoalStateForStorage(authoritative)) : undefined;
 	goalStateCache.set(sessionManager, { latestEntryId, state: stored });
 	return stored;
 }
 
-function replayGoalEventBatches(base: GoalState, batches: readonly GoalEventBatchPayload[]): GoalState | undefined {
+interface GoalReplayBatch {
+	payload: GoalEventBatchPayload;
+	entryId: string;
+	targetEntryId: string;
+}
+
+export function replayGoalEventBatches(base: GoalState, batches: readonly GoalReplayBatch[]): GoalState | undefined {
 	let state = base;
-	for (const batch of batches) {
+	for (const { payload: batch, entryId, targetEntryId } of batches) {
 		if (batch.goalId !== state.goalId || batch.baseRevision !== (state.revision ?? 0)) return undefined;
-		for (const event of batch.events) state = applyGoalEvent(state, event);
+		for (const [index, event] of batch.events.entries()) {
+			// Only a retained canonical owner edit immediately after a durable completion proves legacy authority.
+			const admitted =
+				state.status === "completed" && event.type === "edit_goal" && index === 0
+					? {
+							type: "correct_completed_goal" as const,
+							correction: {
+								ownerEntryId: entryId,
+								revision: (state.revision ?? 0) + 1,
+								targetCompletionRevision: state.revision ?? 0,
+								targetCompletionEntryId: targetEntryId,
+								objective: event.userGoal,
+							},
+							tokenBudget: event.tokenBudget,
+							now: event.now,
+						}
+					: event;
+			try {
+				state = applyGoalEvent(state, admitted, batch.proofLifecycle ?? "legacy");
+			} catch {
+				return undefined;
+			}
+		}
 	}
 	return state;
 }
@@ -219,7 +337,7 @@ export function getLatestGoalStateSnapshot(sessionManager: GoalStateSource): Goa
 	if (cached?.latestEntryId === latestEntryId) return cached.state;
 	if (!latestEntry) return cacheGoalState(sessionManager, latestEntryId, undefined);
 
-	const batches: GoalEventBatchPayload[] = [];
+	const batches: GoalReplayBatch[] = [];
 	let entry = latestEntry;
 	for (;;) {
 		if (cached?.state && entry.id === cached.latestEntryId) {
@@ -237,14 +355,18 @@ export function getLatestGoalStateSnapshot(sessionManager: GoalStateSource): Goa
 		const checkpoint = legacy ?? (journal?.kind === "checkpoint" ? journal.state : undefined);
 		if (checkpoint) {
 			batches.reverse();
-			return cacheGoalState(sessionManager, latestEntryId, replayGoalEventBatches(checkpoint, batches));
+			return cacheGoalState(
+				sessionManager,
+				latestEntryId,
+				replayGoalEventBatches(recoverLegacyGoalCorrection(sessionManager, checkpoint, entry.id), batches),
+			);
 		}
 
 		if (journal?.kind !== "events") return cacheGoalState(sessionManager, latestEntryId, undefined);
-		batches.push(journal);
 		if (entry.parentId === null) return cacheGoalState(sessionManager, latestEntryId, undefined);
 		const previousEntry = sessionManager.getLatestCustomEntryOnBranch(GOAL_STATE_CUSTOM_TYPE, entry.parentId);
 		if (!previousEntry) return cacheGoalState(sessionManager, latestEntryId, undefined);
+		batches.push({ payload: journal, entryId: entry.id, targetEntryId: previousEntry.id });
 		entry = previousEntry;
 	}
 }

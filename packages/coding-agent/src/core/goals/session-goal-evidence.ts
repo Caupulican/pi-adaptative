@@ -3,11 +3,66 @@ import type { SessionManager } from "../../kernel/node.ts";
 import { isPassingTestVerification, retainedVerificationDetails } from "../../kernel/verification-obligations.ts";
 import { type BackgroundToolTaskRecord, findBackgroundToolTask } from "../background-tool-task-controller.ts";
 import { textContentPrefix } from "../context/message-text.ts";
-import type { GoalToolEvidenceResolution, GoalUserEvidenceResolution } from "../tools/goal.ts";
+import { awaitPreflight } from "../preflight.ts";
+import { redactKnownSecrets, redactTokenShapes } from "../security/secret-text.ts";
+import type { GoalToolDependencies, GoalToolEvidenceResolution, GoalUserEvidenceResolution } from "../tools/goal.ts";
 import { shellWord } from "../tools/shell-command-parser.ts";
 import { ownerOriginKind, stampedHistoryStart } from "../turn-origin.ts";
 
-type EvidenceTask = Pick<BackgroundToolTaskRecord, "taskId" | "toolCallId" | "goalId" | "status" | "piVerification">;
+import { resolveNativeGoalFileEvidence } from "./file-evidence.ts";
+import { requirementKey } from "./goal-acceptance.ts";
+import type { GoalEvidenceKind, GoalEvidenceOutcome, GoalEvidenceRef, GoalState, Requirement } from "./goal-state.ts";
+import { isExplicitRequirementCheckContract } from "./requirement-checks.ts";
+import { resolvedGoalEvidenceObservation } from "./requirement-coverage.ts";
+
+type EvidenceTask = Pick<
+	BackgroundToolTaskRecord,
+	"taskId" | "toolCallId" | "goalId" | "status" | "piVerification" | "output"
+>;
+
+/** Live evidence reader shared by goal tools and the completion reviewer's canonical projection. */
+export function createSessionGoalEvidenceReader(ports: {
+	manager(): SessionManager;
+	tasks(): readonly BackgroundToolTaskRecord[];
+	isBuiltin(toolName: string): boolean;
+}) {
+	const resolve = (uri: string, kind: "tool" | "test", observe = false) =>
+		resolveSessionToolEvidence(ports.manager(), ports.tasks(), uri, kind, ports.isBuiltin, observe);
+	return {
+		resolve,
+		observe: (evidence: GoalEvidenceRef) => resolvedGoalEvidenceObservation(evidence, resolve),
+	};
+}
+
+/** Deterministic coverage is available when the owner stated exactly the command and outcome being measured. */
+export function ownerSpecifiedRequirementCheck(
+	sessionManager: Pick<SessionManager, "getBranch" | "getSessionId">,
+	goal: GoalState | undefined,
+	requirement: Requirement,
+): boolean {
+	if (!goal || !isExplicitRequirementCheckContract(requirement)) return false;
+	const current = goal.requirements.find((item) => item.id === requirement.id);
+	if (!current || requirementKey(current) !== requirementKey(requirement)) return false;
+	const prefix = `${sessionManager.getSessionId()}/`;
+	const initial = goal.ownerSourceId?.startsWith(prefix) ? goal.ownerSourceId.slice(prefix.length) : undefined;
+	return [initial, goal.amendmentOwnerEntryId].some(
+		(entryId) =>
+			entryId !== undefined &&
+			resolveSessionUserEvidence(sessionManager, requirement.text, `user-message:${entryId}`).verified,
+	);
+}
+
+function toolObservation(call: ToolCall, output: string | undefined): string {
+	const bounded = (text: string, limit: number) => {
+		const safe = redactTokenShapes(redactKnownSecrets(text));
+		return safe.length > limit ? `${safe.slice(0, limit)} [truncated]` : safe;
+	};
+	return [
+		`Tool ${call.name}, receipt ${call.id}, completed successfully.`,
+		`Operation: ${bounded(producingCommand(call) ?? JSON.stringify(call.arguments ?? {}), 1024)}`,
+		`Observed output: ${output ? bounded(output, 4096) : "(no text retained)"}`,
+	].join("\n");
+}
 
 /**
  * Prove that the cited statement came from a user message on this branch. Internal continuation
@@ -50,10 +105,12 @@ export function producingCommand(call: ToolCall): string | undefined {
 	if (call.name === "run_process") {
 		// The tool runs its argv without a shell (`executable` and `args`): the same program written as one command line.
 		const executable = call.arguments?.executable;
-		if (typeof executable !== "string" || executable.trim() === "") return undefined;
+		if (typeof executable !== "string" || executable.length === 0) return undefined;
 		const args: unknown = call.arguments?.args;
-		const words = Array.isArray(args) ? args.filter((arg): arg is string => typeof arg === "string") : [];
-		return [shellWord(executable.trim()), ...words.map(shellWord)].join(" ");
+		if (args !== undefined && (!Array.isArray(args) || !args.every((arg): arg is string => typeof arg === "string")))
+			return undefined;
+		const words = (args ?? []) as string[];
+		return [shellWord(executable), ...words.map(shellWord)].join(" ");
 	}
 	if (call.name === "python") {
 		const code = call.arguments?.code ?? call.arguments?.scriptPath;
@@ -72,17 +129,25 @@ export function pythonCallLanguage(call: ToolCall): "python" | "python-file" | u
 	return typeof call.arguments?.code === "string" ? "python" : "python-file";
 }
 
-/**
- * One spelling for a cited command and for the command a call actually ran, so the two compare on
- * what was executed rather than on how it was typed.
- *
- * Identity still comes from the text itself: only layout is normalized (surrounding and internal
- * whitespace, one trailing `;`). Case, flags, ordering and every other character stay significant,
- * so a paraphrase or a different invocation can never select a call it did not produce. Measured
- * live, a re-typed command with a collapsed run of spaces cost a rejected goal turn each time.
- */
-function normalizeProducingCommand(value: string): string {
-	return value.trim().replace(/\s+/g, " ").replace(/;$/, "").trim();
+/** Only unquoted shell words have layout-insensitive separators; source and quoted bytes remain exact. */
+function simpleShellCommand(value: string): string | undefined {
+	const command = value
+		.replace(/^[ \t]+|[ \t]+$/g, "")
+		.replace(/;$/, "")
+		.replace(/[ \t]+$/g, "");
+	const words = command.split(/[ \t]+/);
+	return words.length > 0 && words.every((word) => word.length > 0 && shellWord(word) === word)
+		? words.join(" ")
+		: undefined;
+}
+
+function matchesProducingCommand(call: ToolCall, citation: string): boolean {
+	const produced = producingCommand(call);
+	if (produced === undefined) return false;
+	if (produced === citation) return true;
+	if (call.name === "python") return false;
+	const simple = simpleShellCommand(produced);
+	return simple !== undefined && simple === simpleShellCommand(citation);
 }
 
 const MAX_COMMAND_EXCERPT_CHARS = 60;
@@ -104,7 +169,7 @@ function unmatchedCommandReason(branch: ReturnType<SessionManager["getBranch"]>)
 			if (call?.type !== "toolCall") continue;
 			const command = producingCommand(call);
 			if (command === undefined) continue;
-			const excerpt = normalizeProducingCommand(command);
+			const excerpt = command;
 			suggestions.push(
 				`${call.id} (${excerpt.length > MAX_COMMAND_EXCERPT_CHARS ? `${excerpt.slice(0, MAX_COMMAND_EXCERPT_CHARS)}…` : excerpt})`,
 			);
@@ -132,26 +197,28 @@ export function resolveSessionToolEvidence(
 	uri: string,
 	kind: "tool" | "test",
 	isBuiltinTool: (toolName: string) => boolean,
+	observe = false,
 ): GoalToolEvidenceResolution {
 	const locator = uri.trim();
 	if (!locator) return { verified: false, reason: "cite a producing toolCallId or its exact command" };
 	const task = findBackgroundToolTask(backgroundTasks, locator);
 	const callId = task?.toolCallId ?? locator;
-	const command = normalizeProducingCommand(locator.replace(/^(?:command|cmd|run|shell|tool)\s*[:=]\s*/i, ""));
+	const labeledCommand = uri.replace(/^[ \t]*(?:command|cmd|run|shell|tool)[ \t]*[:=][ \t]*/i, "");
 	const branch = sessionManager.getBranch();
 	let call: ToolCall | undefined;
 	let callIndex = -1;
 	// Prefer an exact id over command text, even if a later command happens to spell that id.
-	for (const matchCommand of [false, true]) {
+	for (const selection of ["id", "command", "labeled-command"] as const) {
+		if (selection === "labeled-command" && labeledCommand === uri) continue;
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 			call = entry.message.content.findLast((part): part is ToolCall => {
 				if (part.type !== "toolCall") return false;
-				if (!matchCommand) return part.id === callId;
+				if (selection === "id") return part.id === callId;
 				if (task) return false;
-				const produced = producingCommand(part);
-				return produced !== undefined && normalizeProducingCommand(produced) === command;
+				if (selection === "labeled-command" && part.name === "python") return false;
+				return matchesProducingCommand(part, selection === "labeled-command" ? labeledCommand : uri);
 			});
 			if (call) {
 				callIndex = index;
@@ -182,6 +249,9 @@ export function resolveSessionToolEvidence(
 			verified: true,
 			toolCallId: call.id,
 			outcome: background.status === "completed" ? "succeeded" : background.status,
+			...(observe && builtinProducer && background.status === "completed"
+				? { observation: toolObservation(call, background.output) }
+				: {}),
 		};
 	}
 
@@ -204,7 +274,73 @@ export function resolveSessionToolEvidence(
 		) {
 			return { verified: false, reason: "the producing call has no trusted passing verification receipt" };
 		}
-		return { verified: true, toolCallId: call.id, outcome: result.isError ? "failed" : "succeeded" };
+		return {
+			verified: true,
+			toolCallId: call.id,
+			outcome: result.isError ? "failed" : "succeeded",
+			...(observe && builtinProducer && !result.isError
+				? { observation: toolObservation(call, textContentPrefix(result.content)) }
+				: {}),
+		};
 	}
 	return { verified: false, reason: "the producing call has no terminal result on the active branch" };
+}
+
+/**
+ * Validate an evidence ref's `uri` against session records ("tool") or the filesystem ("file").
+ * Returns `undefined` for kinds/refs that carry nothing checkable (e.g. "finding",
+ * or a missing `uri`) -- absence of a ref is not the same as a ref that failed to verify.
+ */
+export async function resolveEvidenceVerified(
+	kind: GoalEvidenceKind,
+	uri: string | undefined,
+	summary: string,
+	deps: GoalToolDependencies,
+	signal?: AbortSignal,
+): Promise<{ verified: boolean | undefined; uri?: string; reason?: string; outcome?: GoalEvidenceOutcome }> {
+	if (kind === "file" && uri) {
+		return awaitPreflight(
+			() =>
+				deps.resolveFileEvidence
+					? deps.resolveFileEvidence(uri, signal)
+					: resolveNativeGoalFileEvidence(uri, deps.cwd?.() ?? process.cwd(), signal),
+			signal,
+		);
+	}
+	if (kind === "user") {
+		const resolved = deps.resolveUserEvidence?.(summary, uri);
+		if (!resolved) return { verified: false, reason: "user-statement verification is unavailable" };
+		return resolved.verified
+			? { verified: true, uri: `user-message:${resolved.messageEntryId}` }
+			: { verified: false, reason: resolved.reason };
+	}
+	const trimmedUri = uri?.trim();
+	if (!trimmedUri) return { verified: undefined };
+	if (kind === "tool" || kind === "test") {
+		const resolved = deps.resolveToolEvidence?.(uri!, kind);
+		if (!resolved) return { verified: false, reason: "session evidence verification is unavailable" };
+		return resolved.verified
+			? { verified: true, uri: resolved.toolCallId, outcome: resolved.outcome }
+			: { verified: false, reason: resolved.reason };
+	}
+	if (kind === "worker") {
+		if (!deps.getLaneRecords || !deps.getWorkerClaimSnapshots) return { verified: false };
+		const laneId = trimmedUri;
+		const record = deps.getLaneRecords().find((candidate) => candidate.laneId === laneId);
+		if (!record) return { verified: false };
+		const claim = deps.getWorkerClaimSnapshots().find((candidate) => candidate.requestId === laneId);
+		if (!claim) return { verified: false };
+		// An unreviewed mutation (parentReviewRequired && no parentReviewedAt) can never verify true --
+		// this is what stops an unreviewed worker completion from ungating goal completion through
+		// the existing verified/complete gate (goal-tool-core's isVerifiedOrUserEvidence/complete).
+		if (claim.parentReviewRequired === true && claim.parentReviewedAt === undefined) return { verified: false };
+		// The host's own check of the report can refuse what the worker's status claims: a report whose
+		// stated claims are contradicted or missing named proof does not verify a requirement. Absent (an
+		// older claim, or one with nothing to check) and `accepted` verify as before; `unverified` (a text
+		// answer after a report request) stands as it always did, because nothing was checked either way.
+		const verdict = claim.hostVerdict?.verdict;
+		if (verdict === "needs_more" || verdict === "rejected" || verdict === "blocked") return { verified: false };
+		return { verified: claim.status === "completed" };
+	}
+	return { verified: undefined };
 }

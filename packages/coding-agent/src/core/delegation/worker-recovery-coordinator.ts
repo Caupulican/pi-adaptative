@@ -638,7 +638,10 @@ export class WorkerRecoveryCoordinator {
 		const fleetRank = planStepRankOfTask(this.options.lifecycle.getTaskRuntimeSnapshot(), attempt.taskId);
 		return {
 			instructions: attempt.dispatch.instructions,
-			objectiveId: task && isGoalObjectiveId(task.objectiveId) ? task.objectiveId : null,
+			objectiveId:
+				attempt.dispatch.objectiveRouteOrigin?.objectiveId ??
+				(task && isGoalObjectiveId(task.objectiveId) ? task.objectiveId : null),
+			...(attempt.dispatch.objectiveRouteOrigin && { objectiveRouteOrigin: attempt.dispatch.objectiveRouteOrigin }),
 			...(attempt.dispatch.knowledgeReferences?.length ? { knowledge: attempt.dispatch.knowledgeReferences } : {}),
 			...(attempt.dispatch.subscriptions?.length ? { subscriptions: attempt.dispatch.subscriptions } : {}),
 			...(attempt.dispatch.receiptOrigin ? { receiptOrigin: attempt.dispatch.receiptOrigin } : {}),

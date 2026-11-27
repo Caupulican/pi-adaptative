@@ -1,7 +1,10 @@
 import type { WorkerClaim } from "../autonomy/contracts.ts";
+import { nativeAgentIdForAttempt } from "../orchestration/attempt-agent-identity.ts";
+import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import { reviewRunVerdict } from "../orchestration/review-verdict.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
-import { attemptVerification, isManagedWorkerAttempt } from "./worker-lane-projection.ts";
+import type { AttemptRuntimeState } from "../orchestration/task-runtime-state.ts";
+import { attemptVerification, isManagedWorkerAttempt, selectedManagedWorkerAttempt } from "./worker-lane-projection.ts";
 
 /** The claim fields that decide whether a worker's result covers a requirement. */
 export type RollupClaim = Pick<
@@ -18,6 +21,8 @@ export type RollupClaim = Pick<
 /** One dispatched generation of a task, as plain data: what it was dispatched for and what it reported. */
 export interface RollupAttempt {
 	laneId: string;
+	generationOwnerId?: string;
+	currentGeneration?: boolean;
 	attemptId: string;
 	requirementIds: readonly string[];
 	/** The latest persisted claim of this generation, absent while it runs or when none was stored. */
@@ -40,12 +45,45 @@ export interface RequirementCoverage {
 	covered: boolean;
 	/** The newest generation that covers the requirement; absent while it is uncovered. */
 	evidenceRef?: RequirementCoverageRef;
+	/** Other independent lanes whose latest generations also cover this requirement. */
+	evidenceRefs?: readonly RequirementCoverageRef[];
+}
+
+/** Every currently accepted independent lane remains available as a source of proof. */
+export function requirementEvidenceRefs(coverage: RequirementCoverage | undefined): readonly RequirementCoverageRef[] {
+	return coverage?.evidenceRefs ?? (coverage?.evidenceRef ? [coverage.evidenceRef] : []);
 }
 
 export interface RequirementRollup {
 	byRequirement: Readonly<Record<string, RequirementCoverage>>;
 	/** Requirement ids no accepted, reviewed result covers yet, in first-seen order. */
 	uncovered: readonly string[];
+}
+
+/** One generation owner for both worker reports and delayed host measurements. */
+export function workerGenerationOwnerId(attempt: AttemptRuntimeState): string {
+	if (isManagedWorkerAttempt(attempt)) return `managed:${attempt.dispatch.logicalLaneId ?? attempt.taskId}`;
+	const agentId = nativeAgentIdForAttempt(attempt);
+	return agentId ? `agent:${agentId}` : `task:${attempt.taskId}`;
+}
+
+const currentWorkerGenerationsMemo = new WeakMap<TaskRuntimeProjection, ReadonlyMap<string, string>>();
+
+/** Durable attempt order applies across task boundaries, with native active bindings taking precedence. */
+export function currentWorkerLaneGenerations(snapshot: TaskRuntimeProjection): ReadonlyMap<string, string> {
+	const immutable = Object.isFrozen(snapshot);
+	const cached = immutable ? currentWorkerGenerationsMemo.get(snapshot) : undefined;
+	if (cached) return cached;
+	const current = new Map<string, string>();
+	for (const attempt of Object.values(snapshot.attempts)) {
+		const laneId = attempt.dispatch.logicalLaneId ?? attempt.taskId;
+		const selected = isManagedWorkerAttempt(attempt) ? selectedManagedWorkerAttempt(snapshot, laneId) : attempt;
+		if (selected) current.set(workerGenerationOwnerId(selected), selected.attemptId);
+	}
+	for (const attempt of latestAgentAttemptsByDurableOrder(snapshot).values())
+		current.set(workerGenerationOwnerId(attempt), attempt.attemptId);
+	if (immutable) currentWorkerGenerationsMemo.set(snapshot, current);
+	return current;
 }
 
 /** An unreviewed mutation never counts: the parent has not yet looked at what the worker changed. */
@@ -59,12 +97,11 @@ function coverageSource(
 ): { source: RequirementCoverageRef["source"]; claim: RollupClaim } | undefined {
 	const claim = attempt.claim;
 	if (claim?.status !== "completed" || !reviewSettled(claim)) return undefined;
-	// An accepted independent verification is the stronger showing, so it is named first: a verifier whose own report the
-	// host also accepted still covers the requirement by its verification, not by that report.
-	if (attempt.verificationAccepted) return { source: "verification", claim };
-	if (claim.hostVerdict?.verdict === "accepted" && claim.hostVerdict.coveredRequirementIds.includes(requirementId)) {
-		return { source: "host_verdict", claim };
-	}
+	const covered = claim.hostVerdict?.coveredRequirementIds.includes(requirementId) === true;
+	// A task-level verdict can identify a single criterion. A multi-criterion task still needs criterion-level coverage.
+	if (attempt.verificationAccepted && (attempt.requirementIds.length === 1 || covered))
+		return { source: "verification", claim };
+	if (covered && claim.hostVerdict?.verdict === "accepted") return { source: "host_verdict", claim };
 	return undefined;
 }
 
@@ -79,11 +116,17 @@ function coverageSource(
 export function projectRequirementRollup(
 	attempts: readonly RollupAttempt[],
 	requirementIds: readonly string[] = [],
+	isCurrentScope?: (attempt: RollupAttempt, requirementId: string) => boolean,
 ): RequirementRollup {
 	const latestByLane = new Map<string, RollupAttempt>();
+	const latestByOwner = new Map<string, RollupAttempt>();
 	const dispatched = new Map<string, string[]>();
 	for (const attempt of attempts) {
-		latestByLane.set(attempt.laneId, attempt);
+		if (attempt.currentGeneration === true || latestByLane.get(attempt.laneId)?.currentGeneration !== true)
+			latestByLane.set(attempt.laneId, attempt);
+		const ownerId = attempt.generationOwnerId ?? attempt.laneId;
+		if (attempt.currentGeneration === true || latestByOwner.get(ownerId)?.currentGeneration !== true)
+			latestByOwner.set(ownerId, attempt);
 		for (const requirementId of attempt.requirementIds) {
 			const laneIds = dispatched.get(requirementId) ?? [];
 			if (!laneIds.includes(attempt.laneId)) laneIds.push(attempt.laneId);
@@ -96,23 +139,31 @@ export function projectRequirementRollup(
 	for (const requirementId of universe) {
 		const laneIds = dispatched.get(requirementId) ?? [];
 		let evidenceRef: RequirementCoverageRef | undefined;
+		const evidenceRefs: RequirementCoverageRef[] = [];
 		for (const laneId of laneIds) {
 			const attempt = latestByLane.get(laneId);
-			if (!attempt?.requirementIds.includes(requirementId)) continue;
+			if (
+				!attempt?.requirementIds.includes(requirementId) ||
+				attempt.currentGeneration === false ||
+				latestByOwner.get(attempt.generationOwnerId ?? attempt.laneId) !== attempt
+			)
+				continue;
 			const coverage = coverageSource(attempt, requirementId);
-			if (coverage) {
+			if (coverage && isCurrentScope?.(attempt, requirementId) !== false) {
 				evidenceRef = {
 					laneId: attempt.laneId,
 					attemptId: attempt.attemptId,
 					source: coverage.source,
 					summary: coverage.claim.summary,
 				};
+				evidenceRefs.push(evidenceRef);
 			}
 		}
 		byRequirement[requirementId] = {
 			laneIds,
 			covered: evidenceRef !== undefined,
 			...(evidenceRef ? { evidenceRef } : {}),
+			...(evidenceRefs.length > 1 ? { evidenceRefs } : {}),
 		};
 		if (!evidenceRef) uncovered.push(requirementId);
 	}
@@ -128,35 +179,34 @@ export function projectRequirementRollup(
 export function rollupAttemptsFromSnapshot(
 	snapshot: TaskRuntimeProjection,
 	claims: readonly RollupClaim[],
+	objectiveId?: string,
 ): RollupAttempt[] {
 	const rollupAttempts: RollupAttempt[] = [];
-	for (const task of Object.values(snapshot.tasks)) {
-		const taskAttempts = task.attemptIds.flatMap((attemptId) => {
-			const attempt = snapshot.attempts[attemptId];
-			return attempt ? [attempt] : [];
-		});
-		const newestAttemptId = taskAttempts.at(-1)?.attemptId;
-		for (const attempt of taskAttempts) {
-			const requirementIds = attempt.dispatch.requirementIds ?? [];
-			if (requirementIds.length === 0) continue;
-			const managed = isManagedWorkerAttempt(attempt);
-			const laneId = managed ? (attempt.dispatch.logicalLaneId ?? task.task.taskId) : task.task.taskId;
-			let claim: RollupClaim | undefined;
-			for (const candidate of claims) {
-				if (candidate.requestId !== laneId) continue;
-				const named = candidate.terminalAttemptId ?? (managed ? undefined : newestAttemptId);
-				if (named === attempt.attemptId) claim = candidate;
-			}
-			rollupAttempts.push({
-				laneId,
-				attemptId: attempt.attemptId,
-				requirementIds,
-				...(claim ? { claim } : {}),
-				verificationAccepted:
-					attemptVerification(snapshot, attempt)?.verdict === "accepted" ||
-					reviewRunVerdict(snapshot, attempt)?.kind === "accepted",
-			});
+	const current = currentWorkerLaneGenerations(snapshot);
+	for (const attempt of Object.values(snapshot.attempts)) {
+		const task = snapshot.tasks[attempt.taskId];
+		if (!task || (objectiveId !== undefined && task.task.objectiveId !== objectiveId)) continue;
+		const requirementIds = attempt.dispatch.requirementIds ?? [];
+		const managed = isManagedWorkerAttempt(attempt);
+		const laneId = managed ? (attempt.dispatch.logicalLaneId ?? task.task.taskId) : task.task.taskId;
+		const generationOwnerId = workerGenerationOwnerId(attempt);
+		let claim: RollupClaim | undefined;
+		for (const candidate of claims) {
+			if (candidate.requestId !== laneId) continue;
+			const named = candidate.terminalAttemptId ?? (managed ? undefined : task.attemptIds.at(-1));
+			if (named === attempt.attemptId) claim = candidate;
 		}
+		rollupAttempts.push({
+			laneId,
+			generationOwnerId,
+			currentGeneration: current.get(generationOwnerId) === attempt.attemptId,
+			attemptId: attempt.attemptId,
+			requirementIds,
+			...(claim ? { claim } : {}),
+			verificationAccepted:
+				attemptVerification(snapshot, attempt)?.verdict === "accepted" ||
+				reviewRunVerdict(snapshot, attempt)?.kind === "accepted",
+		});
 	}
 	return rollupAttempts;
 }

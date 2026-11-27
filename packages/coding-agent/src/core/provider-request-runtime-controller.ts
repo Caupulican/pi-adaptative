@@ -37,10 +37,14 @@ export interface ProviderRequestRuntimeControllerDeps {
 	context: Pick<ProviderRequestContextController, "plan">;
 	parentInputs: Pick<
 		SessionManager,
-		"captureParentNotes" | "getPendingParentInputs" | "getActiveParentInputWake" | "getSkippedParentInputIds"
+		| "captureParentNotes"
+		| "getPendingParentInputs"
+		| "getActiveParentInputWake"
+		| "getSkippedParentInputIds"
+		| "getMessageEntryId"
 	>;
 	getSubmissionEpoch(): number | undefined;
-	admitGoalRequest(): number | undefined;
+	admitGoalRequest(reportSignal?: AbortSignal, reportCallId?: string): number | undefined;
 	ordinaryWork?: Pick<OrdinaryWorkController, "enrollCurrentOwner" | "reportingRevision">;
 	/** Session-wide per-response output cap; see SettingsManager.getMaxOutputTokens. */
 	maxOutputTokens(): number;
@@ -85,14 +89,19 @@ export class ProviderRequestRuntimeController {
 	}
 
 	/** Refresh only live runtime metadata; keep the loop's canonical message history. */
-	installTurnRefresh(...flushInboxes: readonly (() => void)[]): void {
+	installTurnRefresh(
+		parentSteers: { admitQueuedInput: NonNullable<Agent["admitQueuedInput"]>; flushParentSteers(): void },
+		flushTerminalHandoffs: () => void,
+	): void {
 		const agent = this.deps.agent;
+		agent.admitQueuedInput = parentSteers.admitQueuedInput.bind(parentSteers);
 		const previousPrepareNextTurn = agent.prepareNextTurn?.bind(agent);
 		const previousBeforeSteeringPoll = agent.beforeSteeringPoll?.bind(agent);
 		agent.beforeSteeringPoll = async (signal) => {
 			await previousBeforeSteeringPoll?.(signal);
 			// Authoritative inbox refresh after async preparation and graceful-stop checks.
-			for (const flush of flushInboxes) flush();
+			flushTerminalHandoffs();
+			parentSteers.flushParentSteers();
 		};
 		agent.prepareNextTurn = async (signal) => {
 			const previous = previousPrepareNextTurn ? await previousPrepareNextTurn(signal) : undefined;
@@ -320,7 +329,8 @@ export class ProviderRequestRuntimeController {
 			const previous = (await previousAdmission?.(request, signal)) ?? { action: "send" as const };
 			if (previous.action === "replan") return previous;
 			reportingRevision(request.sourceContext.requestOpening, this.deps.ordinaryWork?.enrollCurrentOwner());
-			const goalMaxTokens = this.deps.admitGoalRequest();
+			const report = request.sourceContext.committedToolReport;
+			const goalMaxTokens = this.deps.admitGoalRequest(report?.signal, report?.receipt.toolCallId);
 			// Every request carries an output cap: the session-wide per-response cap, narrowed further
 			// by the goal's remaining budget when one applies. Validated narrowing (shared with the
 			// planner's own final pass) instead of a hand-rolled min-merge, so a degenerate ceiling

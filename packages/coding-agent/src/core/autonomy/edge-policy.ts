@@ -1176,7 +1176,7 @@ export function grantableEdgeClasses(operations: readonly EdgeOperation[]): Edge
 /** How the owner lets a run carrying a third party's words do `operations`: their own turn, or a standing grant. */
 export function thirdPartyReleaseLine(operations: readonly EdgeOperation[]): string {
 	const grantable = grantableEdgeClasses(operations);
-	return `It runs only when the owner asks for it in their own turn${grantable.length > 0 ? `, or after they type ${grantable.map((edgeClass) => `/edge allow ${edgeClass}`).join(", ")} or list the classes in edge.thirdPartyAllow` : ""}.`;
+	return `Issue a fresh call only when the owner explicitly requests the action in their own turn${grantable.length > 0 ? `, or once standing permission covers it via ${grantable.map((edgeClass) => `/edge allow ${edgeClass}`).join(", ")} or edge.thirdPartyAllow` : ""}.`;
 }
 
 /**

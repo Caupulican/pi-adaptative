@@ -228,6 +228,12 @@ export class ForegroundLifecycleController {
 		for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
 	}
 
+	/** Seal earlier routed messages before publishing an irrevocable input mid-turn. */
+	commitRoutedMessages(): void {
+		for (const [message, entryId] of this.deps.modelRouter.commitSessionBuffer())
+			this.onMessagePersisted(message, entryId);
+	}
+
 	private async onProviderRequestSnapshot(
 		context: ProviderRequestSnapshotContext,
 		signal?: AbortSignal,
@@ -267,8 +273,7 @@ export class ForegroundLifecycleController {
 	): Promise<void> {
 		await this.deps.sessionManager.queueMutation(() => {
 			_signal?.throwIfAborted();
-			const flushed = this.deps.modelRouter.commitSessionBuffer();
-			for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
+			this.commitRoutedMessages();
 			const assistantMessageEntryId = this.getPersistedMessageEntryId(context.assistantMessage);
 			if (!assistantMessageEntryId) {
 				throw new Error("Tool preflight rejection cannot be retained before the assistant message is persisted");
@@ -385,8 +390,7 @@ export class ForegroundLifecycleController {
 
 		return this.deps.sessionManager.queueMutation(() => {
 			signal?.throwIfAborted();
-			const flushed = this.deps.modelRouter.commitSessionBuffer();
-			for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
+			this.commitRoutedMessages();
 			const assistantMessage = calls[0]!.assistantMessage;
 			const assistantMessageEntryId = this.getPersistedMessageEntryId(assistantMessage);
 			if (!assistantMessageEntryId) {

@@ -14,24 +14,21 @@ import {
 import type { AgentMessage } from "../types.ts";
 import { parseWorkerControlRecord, stampWorkerControl, workerControlOf } from "../worker-control-stamp.ts";
 import { parentInputContextIds } from "./parent-input-ledger.ts";
-import type { CompactionEntry, CustomMessageEntry, SessionEntry } from "./session-entries.ts";
+import type { BranchSummaryEntry, CompactionEntry, CustomMessageEntry, SessionEntry } from "./session-entries.ts";
 import type { SessionContext } from "./session-manager-types.ts";
 import { visitSessionAncestry } from "./session-tree.ts";
 
-const synthesizedSessionContextMessages = new WeakSet<AgentMessage>();
-/**
- * The custom_message entry each custom message object was persisted as or materialized from. A custom message is
- * rebuilt from its entry's fields, so unlike a message entry its object identity is not the entry's: this map is
- * the only link from the object back to its entry.
- */
-export const customMessageEntries = new WeakMap<object, CustomMessageEntry>();
+/** Canonical entries behind model-facing rows reconstructed from durable fields. */
+export const sessionContextMessageEntries = new WeakMap<
+	object,
+	CustomMessageEntry | BranchSummaryEntry | CompactionEntry
+>();
 
-export function retainSynthesizedSessionContextMessage<T extends AgentMessage>(
+function retainSynthesizedSessionContextMessage<T extends AgentMessage>(
 	message: T,
-	customEntry?: CustomMessageEntry,
+	entry: CustomMessageEntry | BranchSummaryEntry | CompactionEntry,
 ): T {
-	synthesizedSessionContextMessages.add(message);
-	if (customEntry !== undefined) customMessageEntries.set(message, customEntry);
+	sessionContextMessageEntries.set(message, entry);
 	return message;
 }
 
@@ -63,11 +60,8 @@ export function advanceSessionContextCache(
 export function cloneSessionContext(context: SessionContext): SessionContext {
 	return {
 		messages: context.messages.map((message) => {
-			if (!synthesizedSessionContextMessages.has(message)) return message;
-			const copy = { ...message };
-			const customEntry = customMessageEntries.get(message);
-			if (customEntry !== undefined) customMessageEntries.set(copy, customEntry);
-			return copy;
+			const entry = sessionContextMessageEntries.get(message);
+			return entry ? retainSynthesizedSessionContextMessage({ ...message }, entry) : message;
 		}),
 		thinkingLevel: context.thinkingLevel,
 		model: context.model ? { ...context.model } : null,
@@ -223,11 +217,15 @@ function branchPath(
  * rebuilt context. Session-replacement preparation stores them on the checkpoint so the next rebuild does not emit
  * messages the summary included.
  */
-export function summarizedGapEntryIds(entries: SessionEntry[], leafId?: string | null): string[] {
+export function summarizedGapEntryIds(
+	entries: SessionEntry[],
+	leafId?: string | null,
+	preservedIds?: ReadonlySet<string>,
+): string[] {
 	const path = branchPath(entries, leafId);
 	if (!path) return [];
 	const ids: string[] = [];
-	for (const section of compactedContextSections(path)) {
+	for (const section of compactedContextSections(path, preservedIds)) {
 		if (section.kind === "compacted") for (const entry of section.selection.restoredGaps) ids.push(entry.id);
 	}
 	return ids;
@@ -365,8 +363,10 @@ type ContextSection =
  * shorter branch ending there would be: by its own latest checkpoint, and so on, down to a raw section or an
  * unscoped checkpoint. Each step scans backward from the previous section's start, so the whole path is read once.
  */
-function compactedContextSections(path: readonly SessionEntry[]): ContextSection[] {
-	const pendingInputIds = parentInputContextIds(path);
+function compactedContextSections(
+	path: readonly SessionEntry[],
+	pendingInputIds = parentInputContextIds(path),
+): ContextSection[] {
 	const sections: ContextSection[] = [];
 	let end = path.length;
 	while (end > 0) {
@@ -503,6 +503,7 @@ function sessionContextMessage(entry: SessionEntry): AgentMessage | undefined {
 	if (entry.type === "branch_summary" && entry.summary) {
 		return retainSynthesizedSessionContextMessage(
 			createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp),
+			entry,
 		);
 	}
 	return undefined;
@@ -516,6 +517,7 @@ export function sessionHistoryMessage(entry: SessionEntry): AgentMessage | undef
 function sessionCompactionMessage(entry: CompactionEntry, summary: string): AgentMessage {
 	return retainSynthesizedSessionContextMessage(
 		createCompactionSummaryMessage(summary, entry.tokensBefore, entry.timestamp, entry.details, entry.id),
+		entry,
 	);
 }
 
@@ -541,7 +543,10 @@ export function deliveredTurnOrigin(message: AgentMessage): { turnOrigin?: TurnO
  * The messages {@link buildSessionContext} rebuilds for a branch path (root to leaf), in order, each with its source
  * entry. The one owner of what a rebuilt context holds: anything that reports on the active context reads this.
  */
-export function sessionContextItems(path: readonly SessionEntry[]): SessionContextItem[] {
+export function sessionContextItems(
+	path: readonly SessionEntry[],
+	preservedIds?: ReadonlySet<string>,
+): SessionContextItem[] {
 	const items: SessionContextItem[] = [];
 	const appendMessage = (entry: SessionEntry) => {
 		const message = sessionContextMessage(entry);
@@ -549,7 +554,7 @@ export function sessionContextItems(path: readonly SessionEntry[]): SessionConte
 	};
 
 	// Sections run earliest first: a scoped checkpoint follows the context of the entries before its scope.
-	for (const section of compactedContextSections(path)) {
+	for (const section of compactedContextSections(path, preservedIds)) {
 		if (section.kind === "raw") {
 			// No compaction before this point - emit all messages, handle branch summaries and custom messages
 			for (let i = 0; i < section.end; i++) appendMessage(path[i] as SessionEntry);

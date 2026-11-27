@@ -28,6 +28,27 @@ import {
 	workerTranscriptLocation,
 } from "./worker-storage-identity.ts";
 
+/** Borrow the append lock only for a current transcript view. */
+export function withCurrentSessionAppend<T>(
+	roots: SessionStorageRoots,
+	file: string,
+	view: { session: ReadonlySessionManager; revision: Stats | undefined },
+	operation: () => T,
+): T {
+	return withSessionFileMutation(
+		roots,
+		file,
+		view.session.getSessionId(),
+		"append",
+		() => {
+			if (!view.revision || !sameFileVersion(view.revision, statSync(file)))
+				throw new Error("Parent session changed on disk; reopen it before delivering input.");
+			return operation();
+		},
+		view,
+	);
+}
+
 export type SessionFileMutationKind = "create" | "initialize" | "append" | "rewrite" | { enrollmentKey: string };
 
 interface FileOwner {

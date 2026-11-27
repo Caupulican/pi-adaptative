@@ -89,6 +89,7 @@ import type {
 	WorkerRole,
 } from "../orchestration/contracts.ts";
 import { ledgerSkip, RungRefusedError, type StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
+import { assertObjectiveRouteOwner } from "../orchestration/dispatch-request-fields.ts";
 import type { ModelTransferRecord } from "../orchestration/model-transfer.ts";
 import { costCeilingUsd, envelopeCostBudget, isMeteredSpend } from "../orchestration/risk-budget.ts";
 import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
@@ -2040,6 +2041,11 @@ export class WorkerDelegationController {
 			};
 		}
 		let shipment = adaptive.shipment;
+		if (
+			request.requireExactModel &&
+			(shipment.model.provider !== authority?.model?.provider || shipment.model.id !== authority?.model?.modelId)
+		)
+			return { ok: false, skipReason: "objective_expert_model_conflicts_with_admission" };
 		if (this.deps.isModelAllowed?.(shipment.model) === false) {
 			return { ok: false, skipReason: "worker_model_disallowed" };
 		}
@@ -2988,7 +2994,7 @@ export class WorkerDelegationController {
 		const goal = this.goalForWorkerRequest(request);
 		if (!goal?.requirements || goal.requirements.length === 0) return undefined;
 		return unmetGoalDependencyReason({
-			requirements: goal.requirements,
+			goal,
 			requirementIds: request.taskContext?.requirementIds ?? [],
 			snapshot: () => this.lifecycle.getTaskRuntimeSnapshot(),
 			claims: () => getWorkerClaimSnapshots(getActiveSessionBranchEntries(this.deps.getSessionManager())),
@@ -3086,21 +3092,13 @@ export class WorkerDelegationController {
 		return names;
 	}
 
-	/** One durable preparation path for queued, immediate, and recovered execution. */
-	/**
-	 * The durable identity of one caller turn. Fresh dispatches and reused mailbox turns record the
-	 * SAME id -- the one `WorkerAgentControlCoordinator` derives for its mailbox message -- so a replay
-	 * resolves through one rail whichever way the original call was admitted.
-	 */
+	/** Fresh and reused dispatches use the same session-scoped control message ID for replay. */
 	private controlMessageIdFor(messageReplayKey: string | undefined): string | undefined {
 		if (!messageReplayKey) return undefined;
 		return workerAgentMessageId(this.deps.getSessionId(), messageReplayKey);
 	}
 
-	/**
-	 * The task one durable caller turn already admitted, if this start is a replay of it. Replaying a
-	 * tool call must return that same task -- never a second one, and never a second execution.
-	 */
+	/** Resolve a replayed caller turn to its already admitted attempt. */
 	private replayedWorkerAttempt(messageReplayKey: string | undefined): AttemptRuntimeState | undefined {
 		const controlMessageId = this.controlMessageIdFor(messageReplayKey);
 		if (!controlMessageId) return undefined;
@@ -3109,12 +3107,7 @@ export class WorkerDelegationController {
 		);
 	}
 
-	/**
-	 * Is this request the SAME admitted command the replayed task already carries? A replay key names
-	 * one caller turn; it is not evidence that the request behind it is unchanged. The full brief (not
-	 * its bounded task-description projection), the compiled specialization, the requested target and
-	 * the task correlation all have to agree, and they are compared before anything is written.
-	 */
+	/** Validate the full command identity before adopting the attempt named by a caller replay key. */
 	private replayMatchesAdmittedCommand(
 		request: WorkerDelegationRequest,
 		admitted: AttemptRuntimeState,
@@ -3122,7 +3115,11 @@ export class WorkerDelegationController {
 		namespaceKeyOf: (root: string | undefined) => string,
 	): boolean {
 		if (admitted.dispatch.instructions !== request.instructions) return false;
-		if (!isDeepStrictEqual(admitted.dispatch.turnOrigin, request.turnOrigin)) return false;
+		if (
+			!isDeepStrictEqual(admitted.dispatch.turnOrigin, request.turnOrigin) ||
+			!isDeepStrictEqual(admitted.dispatch.objectiveRouteOrigin, request.objectiveRouteOrigin)
+		)
+			return false;
 		// The rendered text can read the same for different fields, so a structured task is compared field for field.
 		if (!sameTaskBrief(admitted.dispatch.brief, request.brief)) return false;
 		if (!isDeepStrictEqual(admitted.dispatch.knowledgeReferences ?? [], request.knowledge ?? [])) return false;
@@ -3261,6 +3258,7 @@ export class WorkerDelegationController {
 				{
 					instructions: admission.instructions,
 					...(request.modelTransfer ? { modelTransfer: request.modelTransfer } : {}),
+					objectiveRouteOrigin: request.objectiveRouteOrigin,
 					knowledgeReferences: admission.knowledgeReferences,
 					subscriptions: admission.subscriptions,
 					...(request.delegationObjectiveId !== undefined
@@ -3962,10 +3960,7 @@ export class WorkerDelegationController {
 		return reusable.ok ? decision : { outcome: "unavailable", skipReason: reusable.reasonCode };
 	}
 
-	/**
-	 * Dispatch a task onto an existing specialist through the control coordinator, which already owns
-	 * durable mailbox acceptance, transcript identity and resume. No second dispatch path is added.
-	 */
+	/** Submit a new task to an existing specialist through its durable control mailbox. */
 	private startReusedSpecialistTask(
 		agentId: string,
 		request: WorkerDelegationRequest,
@@ -3988,6 +3983,7 @@ export class WorkerDelegationController {
 					...(taskContext?.dependsOnTaskIds?.length ? { dependsOnTaskIds: taskContext.dependsOnTaskIds } : {}),
 					...(request.messageReplayKey ? { idempotencyKey: request.messageReplayKey } : {}),
 					newTask: {
+						objectiveRouteOrigin: request.objectiveRouteOrigin,
 						knowledgeReferences,
 						subscriptions: request.subscriptions ?? [],
 						controlForkMode: JSON.stringify(this.workerContextForkMode(request, contract)),
@@ -4015,6 +4011,11 @@ export class WorkerDelegationController {
 
 	/** Fresh route work keeps its original goal across awaited directory and specialist admission. */
 	private goalForWorkerRequest(request: WorkerDelegationRequest): GoalState | undefined {
+		assertObjectiveRouteOwner(
+			request.objectiveRouteOrigin,
+			this.deps.getSessionId(),
+			request.delegationObjectiveId ?? request.objectiveId,
+		);
 		// A delegation objective owns the start: the foreground goal neither names it nor gates it.
 		if (request.delegationObjectiveId !== undefined) return undefined;
 		const goal = this.deps.getGoalStateSnapshot();
@@ -4807,7 +4808,7 @@ export class WorkerDelegationController {
 		}
 	}
 
-	runOnce(
+	async runOnce(
 		request: WorkerDelegationRequest,
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
@@ -4815,10 +4816,13 @@ export class WorkerDelegationController {
 	): Promise<WorkerDelegationRunOutcome> {
 		if (this.workerAbort.signal.aborted) return Promise.resolve({ started: false, skipReason: "session_disposed" });
 		const capturedRequest = this.captureWorkerRequest(request, existingRecord !== undefined);
-		return this.runAdmittedWorker(
+		const result = await this.runAdmittedWorker<WorkerDelegationRunOutcome>(
 			() => this.runWorkerOnce(capturedRequest, onStarted, existingRecord, preflight),
 			() => ({ started: false, skipReason: "session_disposed" }),
 		);
+		if (!existingRecord && onStarted && result.record?.status === "queued")
+			void this.scheduler.observeLane(result.record.laneId, { onStarted });
+		return result;
 	}
 
 	private async runWorkerOnce(

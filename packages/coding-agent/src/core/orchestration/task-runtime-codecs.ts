@@ -1,3 +1,13 @@
+import { isGoalObjectiveCursor } from "../goals/goal-correction-contract.ts";
+import {
+	assertAcceptanceCriteria,
+	assertAcceptanceCriterionCount,
+	assertEvidenceCriteriaRetained,
+} from "./objective-criteria.ts";
+import { objectiveEvidenceCounts } from "./objective-evidence-capacity.ts";
+
+export { assertAcceptanceCriteria, assertReferencedAcceptanceCriteriaRetained } from "./objective-criteria.ts";
+
 import { parseTurnOriginRecord, type TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { JsonObject, WorkerReportProgress } from "../autonomy/contracts.ts";
 import { parseTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
@@ -28,6 +38,7 @@ import {
 	boolean,
 	cancellationDetail,
 	dispatchIdentifier,
+	dispatchIdentifierArray,
 	isoDate,
 	number,
 	string,
@@ -63,7 +74,7 @@ import {
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 	MAX_ORCHESTRATION_NOTIFICATIONS,
-	MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE,
+	MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE_ROWS,
 	MAX_ORCHESTRATION_OBJECTIVES,
 	MAX_ORCHESTRATION_TASKS,
 	MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES,
@@ -89,7 +100,7 @@ import {
 	type WorkerModelRouteSource,
 	type WorkerResultContract,
 } from "./contracts.ts";
-import { DISPATCH_FIELDS } from "./dispatch-request-fields.ts";
+import { DISPATCH_FIELDS, objectiveRouteOriginFields } from "./dispatch-request-fields.ts";
 import { assertModelTransferSnapshotBinding, modelTransferAttemptFieldsFromValue } from "./model-transfer.ts";
 import { orchestrationModelBindingFromValue } from "./profile-registry.ts";
 import { retentionArchiveIdsField } from "./retention-event.ts";
@@ -132,7 +143,14 @@ import {
 } from "./worker-receipt-publication.ts";
 import { decodeWorkerResultReceipts } from "./worker-result-receipts.ts";
 
-export { cancellationDetail, dispatchIdentifier, MAX_DATE_EPOCH_MS, number, string } from "./codec-primitives.ts";
+export {
+	cancellationDetail,
+	dispatchIdentifier,
+	dispatchIdentifierArray,
+	MAX_DATE_EPOCH_MS,
+	number,
+	string,
+} from "./codec-primitives.ts";
 
 export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: number): TaskRuntimeProjection {
 	const label = "orchestration projection snapshot";
@@ -292,23 +310,6 @@ export function checkpointSummary(value: unknown, label: string): string {
 	return summary;
 }
 
-export function dispatchIdentifierArray(value: unknown, label: string): string[] {
-	if (
-		!Array.isArray(value) ||
-		value.length > MAX_ORCHESTRATION_COLLECTION_LENGTH ||
-		!value.every(
-			(entry) =>
-				typeof entry === "string" && entry.length > 0 && entry.length <= MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-		)
-	) {
-		throw new DurableTaskRuntimeError(`${label} must be a bounded identifier array.`);
-	}
-	if (new Set(value).size !== value.length) {
-		throw new DurableTaskRuntimeError(`${label} contains duplicates.`);
-	}
-	return [...value];
-}
-
 /** Validate dependency identity and ownership before any durable task event is appended. */
 export function validateTaskDependencyIds(
 	tasks: TaskRuntimeProjection["tasks"],
@@ -424,6 +425,7 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 		throw new DurableTaskRuntimeError(`${label}.brief does not render its instructions.`);
 	}
 	return {
+		...objectiveRouteOriginFields(dispatch.objectiveRouteOrigin),
 		taskId: dispatchIdentifier(dispatch.taskId, `${label}.taskId`),
 		...(knowledgeReferences !== undefined ? { knowledgeReferences } : {}),
 		...(subscriptions !== undefined ? { subscriptions } : {}),
@@ -440,6 +442,14 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 			dispatch.requirementIds === undefined
 				? []
 				: dispatchIdentifierArray(dispatch.requirementIds, `${label}.requirementIds`),
+		...(dispatch.goalRequirementKeys !== undefined
+			? {
+					goalRequirementKeys: dispatchIdentifierArray(
+						dispatch.goalRequirementKeys,
+						`${label}.goalRequirementKeys`,
+					),
+				}
+			: {}),
 		...(executionKind ? { executionKind } : {}),
 		...(logicalLaneId ? { logicalLaneId } : {}),
 		...(typeof dispatch.dispatchSequence === "number" ? { dispatchSequence: dispatch.dispatchSequence } : {}),
@@ -498,9 +508,7 @@ function objectiveFromValue(value: unknown, label: string): ObjectiveContract {
 	if (!Array.isArray(objective.acceptanceCriteria)) {
 		throw new DurableTaskRuntimeError(`${label}.acceptanceCriteria must be an array.`);
 	}
-	if (objective.acceptanceCriteria.length > MAX_ORCHESTRATION_COLLECTION_LENGTH) {
-		throw new DurableTaskRuntimeError(`${label}.acceptanceCriteria exceeds its collection limit.`);
-	}
+	assertAcceptanceCriterionCount(objective.acceptanceCriteria.length);
 	const acceptanceCriteria = objective.acceptanceCriteria.map((value, index): AcceptanceCriterion => {
 		const criterion = exactRecord(value, `${label}.acceptanceCriteria[${index}]`, [
 			"id",
@@ -567,60 +575,33 @@ function evidenceFromValue(value: unknown, label: string): EvidenceContract {
 }
 
 function objectiveRuntimeStateFromValue(value: unknown, label: string): ObjectiveRuntimeState {
-	const state = exactRecord(value, label, ["objective", "taskIds", "evidence"]);
+	const state = exactRecord(value, label, ["objective", "taskIds", "evidence", "goalSource"]);
 	const objective = objectiveFromValue(state.objective, `${label}.objective`);
-	if (!Array.isArray(state.evidence) || state.evidence.length > MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE) {
+	if (state.goalSource !== undefined && !isGoalObjectiveCursor(state.goalSource))
+		throw new DurableTaskRuntimeError(`${label}.goalSource is invalid.`);
+	if (!Array.isArray(state.evidence) || state.evidence.length > MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE_ROWS) {
 		throw new DurableTaskRuntimeError(
-			`${label}.evidence exceeds its retained collection limit (${MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE}).`,
+			`${label}.evidence exceeds its retained collection limit (${MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE_ROWS}).`,
 		);
 	}
 	const evidence = state.evidence.map((item, index) => evidenceFromValue(item, `${label}.evidence[${index}]`));
+	objectiveEvidenceCounts(objective.objectiveId, evidence);
 	const evidenceIds = new Set<string>();
 	for (const item of evidence) {
 		if (evidenceIds.has(item.evidenceId)) {
 			throw new DurableTaskRuntimeError(`${label}.evidence contains duplicate id '${item.evidenceId}'.`);
 		}
 		evidenceIds.add(item.evidenceId);
-		if (item.criterionId && !objective.acceptanceCriteria.some((criterion) => criterion.id === item.criterionId)) {
-			throw new DurableTaskRuntimeError(
-				`${label}.evidence references unknown acceptance criterion '${item.criterionId}'.`,
-			);
-		}
 	}
+	assertEvidenceCriteriaRetained(objective.acceptanceCriteria, evidence);
 	return {
 		objective,
+		...(state.goalSource === undefined
+			? {}
+			: { goalSource: state.goalSource as import("../goals/goal-correction-contract.ts").GoalObjectiveCursor }),
 		taskIds: retainedIdentifierArray(state.taskIds, MAX_ORCHESTRATION_TASKS, `${label}.taskIds`),
 		evidence,
 	};
-}
-
-export function assertAcceptanceCriteria(criteria: readonly AcceptanceCriterion[]): void {
-	const criterionIds = criteria.map((criterion) => criterion.id);
-	if (
-		criterionIds.some((id) => !id.trim()) ||
-		new Set(criterionIds).size !== criterionIds.length ||
-		criteria.some((criterion) => !criterion.description.trim())
-	) {
-		throw new DurableTaskRuntimeError("Objective acceptance criteria require unique ids and descriptions.");
-	}
-}
-
-export function assertReferencedAcceptanceCriteriaRetained(
-	tasks: TaskRuntimeProjection["tasks"],
-	current: ObjectiveRuntimeState,
-	acceptanceCriteria: readonly AcceptanceCriterion[],
-): void {
-	const retainedCriterionIds = new Set(acceptanceCriteria.map((criterion) => criterion.id));
-	const referencedRemovedIds = current.taskIds.flatMap((taskId) =>
-		(tasks[taskId]?.task.acceptanceCriterionIds ?? []).filter(
-			(criterionId) => !retainedCriterionIds.has(criterionId),
-		),
-	);
-	if (referencedRemovedIds.length > 0) {
-		throw new DurableTaskRuntimeError(
-			`Cannot remove acceptance criteria referenced by tasks: ${[...new Set(referencedRemovedIds)].join(", ")}.`,
-		);
-	}
 }
 
 export function taskFromValue(value: unknown, label: string): TaskContract {
@@ -904,6 +885,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		"parentWrites",
 		"verification",
 		"managedLifetime",
+		"firstStartedAt",
 		"executionStartedAt",
 		"createdAt",
 		"updatedAt",
@@ -940,6 +922,9 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 	}
 	return {
 		...modelTransferAttemptFieldsFromValue(attempt, label),
+		...(attempt.firstStartedAt === undefined
+			? {}
+			: { firstStartedAt: isoDate(attempt.firstStartedAt, `${label}.firstStartedAt`) }),
 		attemptId: dispatchIdentifier(attempt.attemptId, `${label}.attemptId`),
 		taskId: dispatchIdentifier(attempt.taskId, `${label}.taskId`),
 		dispatch: dispatchFromValue(attempt.dispatch, `${label}.dispatch`),
@@ -1856,6 +1841,18 @@ function validateSnapshotTaskGraph(state: TaskRuntimeProjection): void {
 				throw new DurableTaskRuntimeError(`${label} attempt '${attemptId}' execution contract is inconsistent.`);
 			}
 		}
+		if (
+			attempt.dispatch.objectiveRouteOrigin &&
+			attempt.dispatch.objectiveRouteOrigin.objectiveId !== task.task.objectiveId
+		)
+			throw new DurableTaskRuntimeError(`${label} attempt '${attemptId}' belongs to another routed objective.`);
+		if (
+			attempt.firstStartedAt !== undefined &&
+			(!attempt.lease ||
+				attempt.status === "queued" ||
+				(attempt.status === "leased" && attempt.lease.fencingToken === 1))
+		)
+			throw new DurableTaskRuntimeError(`${label} attempt '${attemptId}' has no matching start transition.`);
 		if (attempt.lease?.attemptId !== undefined && attempt.lease.attemptId !== attemptId) {
 			throw new DurableTaskRuntimeError(`${label} attempt '${attemptId}' has a cross-attempt lease.`);
 		}

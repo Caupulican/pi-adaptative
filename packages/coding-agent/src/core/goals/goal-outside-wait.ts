@@ -8,6 +8,7 @@
  * watch ledger, which a restart reads back; the goal's runtime snapshot reads the saved answers
  * (`GoalWatchFacts.waitsOutside`), so the continuation decision stays synchronous. Nothing is written to the goal's state. With System One off or out, only bound watches count.
  */
+
 import { createHash } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -16,7 +17,9 @@ import { ACCEPT_ABSENCE_AT, ACCEPT_AT, noulProbability } from "../system-one/ans
 import type { OperationEffectEngine, OperationEvaluation } from "../system-one/operation-classifier.ts";
 import { noteDecisionTrace } from "../system-one/semantic-evaluation-ledger.ts";
 import type { RequirementWaitAnswer, SessionRequirementJudgment } from "../watches/session-watch-ledger.ts";
+import { requirementKey } from "./goal-acceptance.ts";
 import { type GoalState, isGoalExecutionActive, type Requirement } from "./goal-state.ts";
+import { currentGoalRequirements } from "./requirement-proof.ts";
 
 /** How long one judgment may take before it counts as an outage; it runs off the turn, so it delays no one. */
 const GOAL_OUTSIDE_WAIT_TIMEOUT_MS = 10_000;
@@ -69,7 +72,7 @@ export interface GoalOutsideWaitPorts {
 /** One requirement's question, keyed by its goal, its id and its text: changed words are a new question. */
 function questionKey(goalId: string, requirement: Requirement): string {
 	return createHash("sha256")
-		.update(JSON.stringify([goalId, requirement.id, requirement.text]))
+		.update(JSON.stringify([goalId, requirementKey(requirement)]))
 		.digest("hex");
 }
 
@@ -107,7 +110,7 @@ export class GoalOutsideWait {
 	/** The open requirements of `state` judged, at p >= 0.90 on sufficient evidence, to wait on outside state. */
 	waitsOutside(state: GoalState): string[] {
 		const answers = this.answers();
-		return state.requirements.flatMap((requirement) =>
+		return currentGoalRequirements(state).flatMap((requirement) =>
 			requirement.status === "open" && answers.get(questionKey(state.goalId, requirement)) === "waits_outside"
 				? [requirement.id]
 				: [],
@@ -132,7 +135,7 @@ export class GoalOutsideWait {
 		if (!goal || !engine || !isGoalExecutionActive(goal.status)) return undefined;
 		const linked = this.ports.linked(goal.goalId);
 		const answers = this.answers();
-		const requirements = goal.requirements.filter(
+		const requirements = currentGoalRequirements(goal).filter(
 			(requirement) =>
 				requirement.status === "open" &&
 				!linked.has(requirement.id) &&

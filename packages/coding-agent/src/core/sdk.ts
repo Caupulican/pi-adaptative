@@ -47,6 +47,7 @@ import { resolveFastModeServiceTier } from "./fast-mode.ts";
 import type { MachineFacts } from "./fleet/capacity/machine-room.ts";
 import type { WorkerTerminalDeliveryInterposer } from "./foreground-terminal-handoff-controller.ts";
 import { ObjectivePrimaryBindingError } from "./goals/goal-session-controller.ts";
+import { assertGoalIdentityUnambiguous } from "./goals/session-goal-state.ts";
 import type { IntegrityExtension } from "./hooks/index.ts";
 import { configureHarnessLog } from "./log/configure-harness-log.ts";
 import { ModelRegistry } from "./model-registry.ts";
@@ -1024,10 +1025,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						};
 					},
 				};
-
 				const getOwnerRules = () => session.renderOwnerRulesForMission();
 				const workerDispatcher = new RealWorkerDispatcher({
 					session,
+					getAttemptResult: (id) => session.backgroundLanes.getWorkerAttemptResult(id),
 					provenance: "production-live",
 					getOwnerRules,
 				});
@@ -1065,10 +1066,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						admission: observeDeliveryAdmission(cwd, settingsManager.getNpmCommand()),
 					});
 
-				// The objective loop routes over the goal the owner started: reconcile it into the durable
-				// objective, read budgets from the goal's lease, repairs into durable tasks, limitations from the
-				// open verifications. The raw task runtime alone knows none of that.
+				// Goal reconciliation and execution use the session's current scope and identity.
 				const objectiveRuntime = new SessionObjectiveRuntime({
+					assertGoalIdentity: (goal) => assertGoalIdentityUnambiguous(sessionManager, goal),
 					runtime: durableTaskRuntime,
 					cwd,
 					getGoalState: () => session.getGoalStateSnapshot(),
@@ -1171,10 +1171,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					};
 				};
 				systemOneController.setTruthSource(() => {
-					const goal = session.getGoalStateSnapshot();
 					const repository = readActiveRepository();
 					return projectCanonicalTruth({
-						goal,
+						goal: session.getGoalStateSnapshot(),
+						observeGoalEvidence: (evidence) => session.observeGoalEvidence(evidence),
 						runtime: session.backgroundLanes.getTaskRuntimeSnapshot(),
 						verificationObligations: session.getVerificationObligations(),
 						lastRoute: session.objectiveExecutionController?.getLastRoute(),

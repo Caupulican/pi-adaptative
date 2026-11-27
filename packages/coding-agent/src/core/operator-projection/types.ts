@@ -87,3 +87,17 @@ export interface OperatorEvent {
 	readonly detail?: string;
 	readonly debugRefs?: readonly string[];
 }
+
+export interface RouteDecisionRow {
+	readonly sessionId: string;
+	readonly cwd: string;
+	readonly objectiveId: string;
+	readonly cycleId: string;
+	readonly route: string;
+	readonly reasonCodes: readonly string[];
+	readonly decidedAt: number;
+	/** Digest of accepted evidence on current rows, and the historical progress count on earlier rows. */
+	readonly evidenceMarker: number;
+	readonly workKey?: string;
+	readonly executor?: string;
+}

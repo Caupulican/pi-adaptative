@@ -84,7 +84,7 @@ export interface BackgroundLaneControllerDeps
 	 */
 	readonly systemOne: Pick<
 		SessionSemanticPlaneController,
-		"recordingSemanticEngine" | "semanticDecisionEngine" | "configured" | "enabled" | "source"
+		"recordingSemanticEngine" | "semanticDecisionEngine" | "configured" | "enabled" | "source" | "getDecisionLedger"
 	>;
 	/**
 	 * The bot whose own session this is (its standing), undefined for any other session: an owner's stop waiting in that

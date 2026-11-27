@@ -2,22 +2,24 @@ import type { AssistantMessage } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentRunawayStopInfo } from "../../kernel/index.ts";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
-import { MAX_SESSION_ENTRY_VISIT_COUNT, type SessionManager } from "../../kernel/session/session-manager.ts";
+import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import {
-	type GoalContinuationLoopOptions,
-	type GoalContinuationLoopResult,
-	type GoalContinuationOnceOptions,
-	type GoalContinuationOnceResult,
-	type GoalContinuationTurnOutcome,
-	isInterruptedAssistantStopReason,
-	type PromptOptions,
+import type {
+	GoalContinuationLoopOptions,
+	GoalContinuationLoopResult,
+	GoalContinuationOnceOptions,
+	GoalContinuationOnceResult,
+	GoalContinuationTurnOutcome,
+	PromptOptions,
 } from "../agent-session-contracts.ts";
 import { GoalLoopController } from "../goal-loop-controller.ts";
 import type { OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
 import {
 	assertCurrentGoalObjective,
+	type GoalCompletionPresentation,
+	GoalExecutionCustody,
 	ObjectiveExecutionInterruptedError,
+	sameGoalExecution,
 } from "../objective-execution/current-objective-execution.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "../objective-execution/index.ts";
 import type { ObjectiveExecutionControllerDeps } from "../objective-execution/objective-execution-controller.ts";
@@ -25,32 +27,53 @@ import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import { isContinuationNotAdmitted } from "../run-admission.ts";
 import type { TimerSource } from "../util/timer-port.ts";
-import { openWorkUnit } from "../work-units.ts";
 import { type ChatGoalAdmission, planExplicitChatGoal } from "./chat-goal-admission.ts";
 import type { RoutedGoalContext } from "./compact-goal-context.ts";
-import { getGoalCompletionRefusal, reopenUnsupportedGoalCompletion } from "./goal-acceptance.ts";
+import {
+	getGoalCompletionRefusal,
+	reopenUnprovenRequirements,
+	reopenUnsupportedGoalCompletion,
+} from "./goal-acceptance.ts";
 import {
 	type GoalAutoContinueHold,
 	type GoalAutoContinueState,
 	goalAutoContinueModelNote,
 } from "./goal-auto-continue-state.ts";
+import type { GoalCompletionSources } from "./goal-completion-admission.ts";
 import type { GoalCompletionOwnerDecision } from "./goal-completion-owner-decision.ts";
-import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import {
 	GoalBudgetExhaustedError,
+	getContinuationTurnOutcome,
+	isGoalProviderFailure,
 	ObjectiveRootTurnErroredError,
 	ObjectiveRootTurnInterruptedError,
+	submittedGoalTurn,
 } from "./goal-execution-errors.ts";
+import {
+	type GoalExecutionLease,
+	goalExecutionLeaseMarker,
+	type MutableGoalExecutionLease,
+} from "./goal-foreground-lease.ts";
+
+export type { GoalExecutionLease } from "./goal-foreground-lease.ts";
+
+import { reportGoalIdentityConflict } from "./goal-journal-identity.ts";
 import {
 	type GoalResumeSource,
 	type GoalStateRevision,
 	type GoalSystemStop,
 	getAutoResumableReasonPrefix,
 	getGoalStateRevision,
+	matchesGoalStateRevision,
 	planSystemGoalResume,
 	stopGoalFromSystem,
 } from "./goal-lifecycle.ts";
-import { type ObjectiveTerminalPort, settleObjectiveTerminal } from "./goal-objective-terminal.ts";
+import { goalObjectiveRootExecutor } from "./goal-objective-root-turn.ts";
+import {
+	type ObjectiveTerminalPort,
+	parkExhaustedExecutor,
+	settleObjectiveTerminal,
+} from "./goal-objective-terminal.ts";
 import {
 	buildGoalRuntimeSnapshot,
 	type GoalRuntimeFacts,
@@ -58,19 +81,18 @@ import {
 	type GoalRuntimeSnapshotSettings,
 	goalHasInFlightWork,
 } from "./goal-runtime-snapshot.ts";
+import { clearSessionGoal, saveSessionGoal } from "./goal-snapshot-admission.ts";
 import { applyGoalEvent, type GoalState, type GoalStopModel, isGoalExecutionActive } from "./goal-state.ts";
 import type { GoalStartGrant } from "./goal-tool-core.ts";
+import { greetingWorkRefusal } from "./goal-work-admission.ts";
 import {
 	type ExplicitChatGoal,
 	type ExplicitGoalStartAuthority,
 	ownerChatGoal,
 	priorUserPromptText,
 } from "./natural-language-goal.ts";
-import {
-	appendGoalClearedSnapshot,
-	appendGoalStateSnapshot,
-	getLatestGoalStateSnapshot,
-} from "./session-goal-state.ts";
+import { assertGoalIdentityUnambiguous, goalIdentityConflict } from "./session-goal-state.ts";
+import { readGoalProofState, refreshGoalWorkerProof } from "./worker-requirement-evidence.ts";
 
 export interface GoalSessionControllerDeps {
 	getSessionManager(): SessionManager;
@@ -84,8 +106,11 @@ export interface GoalSessionControllerDeps {
 	getModel(): GoalStopModel | undefined;
 	/** The live facts the runtime snapshot reads beside the branch: lanes, task runtime, tool tasks and bound watches. */
 	runtimeFacts(): GoalRuntimeFacts;
+	completionSources?(): GoalCompletionSources;
+	currentWorkerEvidenceIds?(state: GoalState): ReadonlySet<string>;
 	/** The owner evidence a started goal records the owner source it came from in. */
 	getOwnerEvidence(): Pick<OwnerEvidenceLedger, "sourceOfEntry" | "currentTurnSources">;
+	hasDurableGoalObjective?(goalId: string): boolean;
 	synchronizeGoalState(state: GoalState): void;
 	scheduleGoalAutoContinueFromIdle(): void;
 	prompt(text: string, options?: PromptOptions): Promise<void>;
@@ -131,33 +156,6 @@ export class ObjectivePrimaryBindingError extends Error {
  */
 const MIN_VIABLE_GOAL_TURN_OUTPUT_TOKENS = 1_000;
 
-const goalExecutionLeaseMarker: unique symbol = Symbol("goalExecutionLease");
-
-/** Identity-bound attribution for one foreground execution; unbound until it owns a goal. */
-export interface GoalExecutionLease {
-	readonly goalId?: string;
-	readonly [goalExecutionLeaseMarker]: true;
-}
-
-interface MutableGoalExecutionLease extends GoalExecutionLease {
-	/** The foreground submission that began this execution: the execution ends when it releases the foreground. */
-	readonly ownerEpoch: number;
-	goalId?: string;
-	routedContext?: RoutedGoalContext;
-	adoptNewGoal: boolean;
-	adoptionBaselineGoalId?: string;
-	provisionalTokenBudget?: number;
-	pendingTokens: number;
-	pendingSpendUsd: number;
-	/** Last persisted active-time boundary; absent until ordinary work creates its own goal. */
-	lastAccountedAtMs?: number;
-	/** Set once this lease admits a request before its goal stops (possibly before creation). Lets a
-	 * later admission on the SAME still-held lease recognize "the goal ended mid-turn" (drain the
-	 * in-flight turn's wrap-up response) instead of "a new turn is starting against a dead goal"
-	 * (which stays denied). */
-	admittedWhileActive: boolean;
-}
-
 interface QueuedOwnerChatGoal {
 	text: string;
 	authority: ExplicitGoalStartAuthority;
@@ -166,17 +164,6 @@ interface QueuedOwnerChatGoal {
 /** What a bounded harness guard did to the active goal. */
 export type GoalGuardRecovery = "resumed" | "blocked" | "no_goal";
 
-/** Classified reasons that mean the provider, not the harness, ended the turn. */
-const PROVIDER_FAILURE_REASONS: ReadonlySet<string> = new Set([
-	"overloaded",
-	"rate_limit",
-	"server_error",
-	"network",
-	"stream_stall",
-	"auth",
-	"billing_or_quota",
-]);
-
 /**
  * Owns durable goal state, exact continuation accounting, and the raw continuation loop. The
  * AgentSession facade supplies process collaborators but no longer implements goal lifecycle rules.
@@ -184,11 +171,13 @@ const PROVIDER_FAILURE_REASONS: ReadonlySet<string> = new Set([
 export class GoalSessionController {
 	private readonly deps: GoalSessionControllerDeps;
 	private readonly loop: GoalLoopController;
+	readonly executionCustody = new GoalExecutionCustody();
 	private executionLease: MutableGoalExecutionLease | undefined;
 	private startAuthority: ExplicitGoalStartAuthority | undefined;
 	/** Root turns the primary loop submitted; a cycle that dispatched a worker or waited submits none. */
 	private primaryRootTurns = 0;
 	private lastPrimaryTurnOutcome?: GoalContinuationTurnOutcome["outcome"];
+	private completedRootGoal?: GoalState;
 	private executorsBoundTo?: ObjectiveExecutionController;
 	private readonly queuedOwnerChatGoals = new WeakMap<AgentMessage, QueuedOwnerChatGoal>();
 	/**
@@ -204,7 +193,11 @@ export class GoalSessionController {
 			prompt: async (text, options) => {
 				const firstTurnEntryIndex = this.deps.getSessionManager().getEntryCount();
 				await this.deps.prompt(text, options);
-				return this.getContinuationTurnOutcome(firstTurnEntryIndex);
+				return getContinuationTurnOutcome(
+					this.deps.getSessionManager(),
+					firstTurnEntryIndex,
+					this.deps.getModel()?.provider,
+				);
 			},
 			recordGoalContinuationPass: (pass) => this.recordContinuationPass(pass),
 			recordGoalContinuationFailure: (error, goalId) => this.recordContinuationFailure(error, goalId),
@@ -215,52 +208,44 @@ export class GoalSessionController {
 		});
 	}
 
-	private getContinuationTurnOutcome(firstTurnEntryIndex: number): GoalContinuationTurnOutcome {
-		const sessionManager = this.deps.getSessionManager();
-		const endIndex = sessionManager.getEntryCount();
-		let nextIndex = firstTurnEntryIndex;
-		let lastAssistant: Pick<AssistantMessage, "stopReason" | "errorMessage"> | undefined;
-		while (nextIndex < endIndex) {
-			const visitCount = Math.min(MAX_SESSION_ENTRY_VISIT_COUNT, endIndex - nextIndex);
-			nextIndex = sessionManager.visitEntries(nextIndex, visitCount, (entry) => {
-				if (entry.type === "message" && entry.message.role === "assistant") {
-					lastAssistant = { stopReason: entry.message.stopReason, errorMessage: entry.message.errorMessage };
-				}
-			});
-		}
-		if (!lastAssistant) return { outcome: "interrupted" };
-		if (lastAssistant.stopReason === "error" && lastAssistant.errorMessage) {
-			// Only provider failures block the goal. Harness-owned stops have their own recovery paths.
-			const classified = classifyFailure({
-				message: lastAssistant.errorMessage,
-				provider: this.deps.getModel()?.provider,
-			});
-			if (PROVIDER_FAILURE_REASONS.has(classified.reason)) {
-				return { outcome: "errored", errorMessage: lastAssistant.errorMessage };
-			}
-		}
-		return { outcome: isInterruptedAssistantStopReason(lastAssistant.stopReason) ? "interrupted" : "completed" };
+	prepareCompletionPresentation(
+		toolCallId: string,
+		goal: GoalState,
+		signal?: AbortSignal,
+	): GoalCompletionPresentation | undefined {
+		const lease = this.executionLease;
+		if (!lease) return undefined;
+		if (lease.goalId !== undefined && lease.goalId !== goal.goalId)
+			throw new ObjectiveExecutionInterruptedError("goal_changed");
+		const manager = this.deps.getSessionManager();
+		const assertBranch = manager.captureBranchContext();
+		lease.foreground ??= this.executionCustody.openForeground(goal);
+		return this.executionCustody.prepareCompletion(lease.foreground, goal, toolCallId, () => {
+			signal?.throwIfAborted();
+			assertBranch();
+			if (
+				manager !== this.deps.getSessionManager() ||
+				this.executionLease !== lease ||
+				this.deps.getForegroundSubmissionEpoch() !== lease.ownerEpoch
+			)
+				throw new ObjectiveExecutionInterruptedError("session_replaced");
+		});
 	}
 
-	saveState(state: GoalState, expected?: GoalStateRevision): string {
+	saveState(state: GoalState, expected?: GoalStateRevision, presentation?: GoalCompletionPresentation): string {
+		refreshGoalWorkerProof(state, this.deps);
 		const current = this.getState();
-		if (
-			expected &&
-			(!current || current.goalId !== expected.goalId || (current.revision ?? 0) !== expected.revision)
-		) {
+		if (expected && !matchesGoalStateRevision(current, expected)) {
 			throw new Error(
 				`Goal state changed concurrently; expected ${expected.goalId}@${expected.revision}, found ${current ? `${current.goalId}@${current.revision ?? 0}` : "none"}. Retry against the latest state.`,
 			);
 		}
-		// A goal starting is the declared work boundary: the unit it opens runs until the goal ends.
-		if (current?.goalId !== state.goalId && isGoalExecutionActive(state.status)) {
-			openWorkUnit(this.deps.getSessionManager(), {
-				kind: "declared",
-				goalId: state.goalId,
-				reason: state.userGoal,
-			});
+		const manager = this.deps.getSessionManager();
+		const entryId = saveSessionGoal(manager, state, current, this.executionCustody, this.deps, presentation);
+		if (presentation?.committed && this.executionLease) {
+			this.executionLease.presentation = presentation;
+			this.executionLease.goalId ??= state.goalId;
 		}
-		const entryId = appendGoalStateSnapshot(this.deps.getSessionManager(), state, current);
 		if (current?.goalId !== state.goalId) {
 			harnessLog.info("goals", "a goal was set", {
 				goalId: state.goalId,
@@ -326,19 +311,13 @@ export class GoalSessionController {
 	}
 
 	clearState(state: GoalState, now: string): string {
-		const current = this.getState();
-		const expected = getGoalStateRevision(state);
-		if (!current || current.goalId !== expected.goalId || (current.revision ?? 0) !== expected.revision) {
-			throw new Error("Goal state changed concurrently; retry clear against the latest state.");
-		}
-		if (state.status !== "completed" && state.status !== "cancelled") {
-			this.deps.synchronizeGoalState(applyGoalEvent(state, { type: "cancel_goal", now }));
-		}
-		return appendGoalClearedSnapshot(this.deps.getSessionManager(), state, now);
+		return clearSessionGoal(this.deps.getSessionManager(), this.executionCustody, state, now, (goal) =>
+			this.deps.synchronizeGoalState(goal),
+		);
 	}
 
 	getState(): GoalState | undefined {
-		return getLatestGoalStateSnapshot(this.deps.getSessionManager());
+		return readGoalProofState(this.deps);
 	}
 
 	/**
@@ -461,6 +440,8 @@ export class GoalSessionController {
 	 * never replaced, and that is no warning: the judgment ran while the owner's turn did.
 	 */
 	startJudgedOwnerGoal(objective: string, entryId: string): ChatGoalAdmission {
+		const branch = this.deps.getSessionManager().getBranch();
+		if (!branch.some((entry) => entry.id === entryId)) return { status: "not_explicit" };
 		const admission = this.admitExplicitChatGoal({ objective }, entryId);
 		if (admission.status !== "started") return admission;
 		const held = this.executionLease;
@@ -493,6 +474,7 @@ export class GoalSessionController {
 		authority: ExplicitGoalStartAuthority | undefined,
 		messages: readonly { role: string; content?: unknown }[],
 	): string | undefined {
+		if (greetingWorkRefusal({ text })) return undefined;
 		const now = new Date().toISOString();
 		const current = this.getState();
 		const resumed = current && planSystemGoalResume(current, now, "owner");
@@ -515,6 +497,7 @@ export class GoalSessionController {
 		messages: readonly { role: string; content?: unknown }[],
 		entryId: string,
 	): void {
+		if (greetingWorkRefusal({ text })) return;
 		const recoveredGoalId = this.resumeSystemBlockedGoal(undefined, "owner");
 		const goalId = this.startOwnerChatGoal(text, authority, messages, entryId) ?? recoveredGoalId;
 		const lease = this.executionLease;
@@ -530,6 +513,7 @@ export class GoalSessionController {
 	private bindExecution(lease: MutableGoalExecutionLease, goalId: string): void {
 		const state = this.getState();
 		if (state?.goalId !== goalId || !isGoalExecutionActive(state.status)) return;
+		assertGoalIdentityUnambiguous(this.deps.getSessionManager(), state);
 		this.resolveExecutionState(lease);
 		if (lease.goalId === goalId) return;
 		if (lease.goalId !== undefined) {
@@ -624,6 +608,7 @@ export class GoalSessionController {
 		if (ownerEpoch === undefined) throw new Error("Goal execution attribution needs a foreground submission");
 		const state = this.getState();
 		if (goalId) assertCurrentGoalObjective(goalObjectiveId(goalId), state);
+		if (goalId && state) assertGoalIdentityUnambiguous(this.deps.getSessionManager(), state);
 		if (goalId && (!state || !isGoalExecutionActive(state.status))) return undefined;
 		const lease: MutableGoalExecutionLease = {
 			ownerEpoch,
@@ -632,6 +617,7 @@ export class GoalSessionController {
 				? { routedContext: Object.freeze({ goalId, ...options.routedPrompt }) }
 				: {}),
 			[goalExecutionLeaseMarker]: true,
+			admittedWhileActive: false,
 			adoptNewGoal: options.adoptNewGoal === true,
 			...(options.adoptNewGoal && state ? { adoptionBaselineGoalId: state.goalId } : {}),
 			...(options.provisionalTokenBudget !== undefined
@@ -640,7 +626,6 @@ export class GoalSessionController {
 			pendingTokens: 0,
 			pendingSpendUsd: 0,
 			lastAccountedAtMs: goalId || options.adoptNewGoal ? Date.now() : undefined,
-			admittedWhileActive: false,
 		};
 		this.executionLease = lease;
 		return lease;
@@ -663,6 +648,7 @@ export class GoalSessionController {
 		} catch (error) {
 			this.retainUnsavedUsage(lease, error, endedAtMs);
 		} finally {
+			lease.foreground?.release();
 			this.executionLease = undefined;
 		}
 	}
@@ -847,26 +833,34 @@ export class GoalSessionController {
 		return this.resolveExecutionState(lease)?.status === "budget_limited";
 	}
 
+	/** A committed foreground result closes this submission to subsequent work. */
+	getCompletionPresentationSignal(): AbortSignal | undefined {
+		return this.executionLease?.presentation?.signal;
+	}
+
 	/** Reserve only remaining output capacity; actual provider usage is charged on response. */
-	admitProviderRequest(): number | undefined {
+	admitProviderRequest(reportSignal?: AbortSignal, reportCallId?: string): number | undefined {
 		const lease = this.executionLease;
 		if (!lease) return undefined;
 		this.flushPendingExecutionUsage(lease);
 		const state = this.resolveExecutionState(lease);
+		if (state) assertGoalIdentityUnambiguous(this.deps.getSessionManager(), state);
 		if (state?.status === "budget_limited") {
 			throw new GoalBudgetExhaustedError(`goal_token_budget_exhausted: ${state.blockedReason ?? lease.goalId}`);
 		}
+		lease.presentation?.signal.throwIfAborted();
 		if (state && !isGoalExecutionActive(state.status)) {
-			if (!lease.admittedWhileActive) {
-				// A fresh turn/continuation is being started against a goal that is already done —
-				// keep this denied so a dead goal cannot restart itself.
+			if (
+				state.status === "completed"
+					? !lease.presentation?.committed ||
+						lease.presentation.reportDispatched ||
+						reportSignal !== lease.presentation.signal ||
+						reportCallId !== lease.presentation.toolCallId
+					: !lease.admittedWhileActive
+			)
 				throw new Error(`goal_execution_not_active: ${state.goalId} is ${state.status}`);
-			}
-			// This lease already admitted at least one request while the goal was active, so the
-			// goal ended mid-turn (e.g. the model itself just called `goal complete`/`block`). Let
-			// the already-in-flight turn drain to its closing response instead of throwing an error
-			// at the user right after a successful stop.
-			return undefined;
+			// A previously admitted turn may still describe its ordinary block or pause.
+			if (state.status !== "completed") return undefined;
 		}
 		if (!state && lease.goalId !== undefined) {
 			throw new Error(`goal_execution_not_active: ${lease.goalId} no longer exists`);
@@ -1015,37 +1009,23 @@ export class GoalSessionController {
 	 * again over a turn that did not happen.
 	 */
 	objectiveRootExecutor(): NonNullable<ObjectiveExecutionControllerDeps["rootExecutor"]> {
-		return {
-			execute: async (route, signal) => {
-				signal?.throwIfAborted();
-				const goal = assertCurrentGoalObjective(route.objective_id, this.getState());
-				const firstTurnEntryIndex = this.deps.getSessionManager().getEntryCount();
-				this.lastPrimaryTurnOutcome = undefined;
-				await this.deps.prompt(buildObjectiveRoutePrompt(route).text, {
-					expandPromptTemplates: false,
-					processSlashCommands: false,
-					autoContinueGoal: false,
-					internalContextType: GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
-					goalExecutionId: goal?.goalId,
-					preflightResult: (accepted) => {
-						if (accepted) this.primaryRootTurns++;
-					},
-				});
-				const outcome = this.getContinuationTurnOutcome(firstTurnEntryIndex);
-				this.lastPrimaryTurnOutcome = outcome.outcome;
-				if (outcome.outcome === "interrupted") throw new ObjectiveRootTurnInterruptedError();
-				if (outcome.outcome === "errored")
-					throw new ObjectiveRootTurnErroredError(outcome.errorMessage ?? "provider error");
+		return goalObjectiveRootExecutor(
+			this.deps,
+			this.executionCustody,
+			() => this.getState(),
+			(turn) => {
+				if (this.executionLease) this.executionLease.foreground = turn;
+				this.primaryRootTurns++;
 			},
-		};
+			(outcome, completed) => {
+				this.lastPrimaryTurnOutcome = outcome;
+				this.completedRootGoal = completed;
+			},
+		);
 	}
 
 	/** The objective controller with this session's executors bound once; undefined outside primary mode. */
-	private primaryController(): ObjectiveExecutionController | undefined {
-		const mode = this.deps.getExecutionLoopMode?.() ?? this.deps.getObjectiveExecutionController?.()?.getMode();
-		if (mode !== "objective_primary") return undefined;
-		const controller = this.deps.getObjectiveExecutionController?.();
-		if (!controller) return undefined;
+	private bindPrimaryController(controller: ObjectiveExecutionController): ObjectiveExecutionController {
 		if (this.executorsBoundTo !== controller) {
 			controller.bindSessionExecutors({ rootExecutor: this.objectiveRootExecutor() });
 			this.executorsBoundTo = controller;
@@ -1054,8 +1034,10 @@ export class GoalSessionController {
 	}
 
 	/** What an objective terminal settles the goal through: this session's state and stop path, and its owner and scheduler hooks. */
-	private terminalPort(): ObjectiveTerminalPort {
+	private terminalPort(snapshot: () => GoalRuntimeSnapshot): ObjectiveTerminalPort {
 		return {
+			completionSources: this.deps.completionSources,
+			getContinuation: () => snapshot().continuation,
 			getState: () => this.getState(),
 			saveState: (state, expected) => {
 				this.saveState(state, expected);
@@ -1074,11 +1056,11 @@ export class GoalSessionController {
 		run: (controller: ObjectiveExecutionController) => Promise<T>,
 		legacy: () => Promise<T>,
 	): Promise<T> {
-		const mode = this.deps.getExecutionLoopMode?.() ?? this.deps.getObjectiveExecutionController?.()?.getMode();
+		const controller = this.deps.getObjectiveExecutionController?.();
+		const mode = this.deps.getExecutionLoopMode?.() ?? controller?.getMode();
 		if (mode !== "objective_primary") return legacy();
-		const controller = this.primaryController();
 		if (!controller) return Promise.reject(new ObjectivePrimaryBindingError("ObjectiveExecutionController"));
-		return run(controller);
+		return run(this.bindPrimaryController(controller));
 	}
 
 	/**
@@ -1139,16 +1121,17 @@ export class GoalSessionController {
 	): Promise<{ result: GoalContinuationOnceResult; disposed: boolean }> {
 		const state = this.getState();
 		const snapshot = () => this.getRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
-		if (state && getGoalCompletionRefusal(state) !== undefined) {
-			// A completion its trusted evidence does not support (a persisted state the completion gate never writes) is
-			// reopened by the reconcile every route evaluation starts with, as in shadow mode. The cycle ends there: the
-			// reopened goal's work runs from the next cycle, on the goal as it now stands.
+		if (state && goalIdentityConflict(this.deps.getSessionManager(), state))
+			return { result: { submitted: false, snapshot: snapshot() }, disposed: false };
+		if (state && this.reopenUnsupportedCompletion()) {
 			await controller.evaluateRouteOnce(goalObjectiveId(state.goalId));
 			return { result: { submitted: false, snapshot: snapshot() }, disposed: false };
 		}
-		if (!state || !isGoalExecutionActive(state.status)) {
+		const admission = snapshot();
+		if (parkExhaustedExecutor(this.terminalPort(() => admission)))
 			return { result: { submitted: false, snapshot: snapshot() }, disposed: false };
-		}
+		if (!state || !isGoalExecutionActive(state.status) || admission.continuation.action === "waiting")
+			return { result: { submitted: false, snapshot: admission }, disposed: false };
 		const before = this.primaryRootTurns;
 		try {
 			return {
@@ -1158,8 +1141,13 @@ export class GoalSessionController {
 		} catch (error) {
 			if (!(error instanceof ObjectiveExecutionInterruptedError)) throw error;
 			const submitted = this.primaryRootTurns > before;
+			const reported = this.completedRootGoal && sameGoalExecution(this.completedRootGoal, this.getState());
 			return {
-				result: { submitted, snapshot: snapshot(), ...(submitted ? { turnOutcome: "interrupted" as const } : {}) },
+				result: {
+					submitted,
+					snapshot: snapshot(),
+					...(submitted ? { turnOutcome: reported ? ("completed" as const) : ("interrupted" as const) } : {}),
+				},
 				disposed: error.reason === "session_disposed",
 			};
 		}
@@ -1171,26 +1159,18 @@ export class GoalSessionController {
 		before: number,
 		snapshot: () => GoalRuntimeSnapshot,
 	): Promise<GoalContinuationOnceResult> {
-		const recordSubmittedTurn = (outcome: GoalContinuationTurnOutcome["outcome"]): void => {
-			this.recordContinuationPass({
-				turns: 1,
-				wallClockMs: 0,
-				goalId: beforeGoal.goalId,
-				progressRevision: beforeGoal.progressRevision ?? 0,
-				stallTurns: beforeGoal.stallTurns,
-				outcome,
-				...(outcome === "completed" ? { completionTurn: (beforeGoal.continuationTurnsUsed ?? 0) + 1 } : {}),
-			});
-		};
 		try {
-			const terminal = await controller.runCycles(goalObjectiveId(beforeGoal.goalId), 1);
+			const objectiveId = goalObjectiveId(beforeGoal.goalId);
+			const signal = this.executionCustody.signalFor(objectiveId, beforeGoal);
+			const terminal = await controller.runCycles(objectiveId, 1, signal);
+			if (terminal) signal?.throwIfAborted();
 			const submitted = this.primaryRootTurns > before;
 			const turnOutcome = this.lastPrimaryTurnOutcome ?? "completed";
 			if (submitted) {
-				recordSubmittedTurn(turnOutcome);
+				this.recordContinuationPass(submittedGoalTurn(beforeGoal, turnOutcome));
 			}
 			const continuationRestartScheduled = terminal
-				? await settleObjectiveTerminal(this.terminalPort(), terminal, beforeGoal.goalId)
+				? await settleObjectiveTerminal(this.terminalPort(snapshot), terminal, beforeGoal.goalId, signal)
 				: false;
 			return {
 				submitted,
@@ -1202,17 +1182,19 @@ export class GoalSessionController {
 			// A pass whose run was not admitted (the foreground lease, which the auto-continuation owner waits for, or the host's
 			// refusal, which its host takes up again) ran no turn: recording it here would block the goal before that retry.
 			if (isContinuationNotAdmitted(error) || error instanceof ObjectiveExecutionInterruptedError) throw error;
+			if (!sameGoalExecution(beforeGoal, this.getState()))
+				throw new ObjectiveExecutionInterruptedError("goal_changed");
 			if (error instanceof ObjectiveRootTurnInterruptedError) {
-				recordSubmittedTurn("interrupted");
+				this.recordContinuationPass(submittedGoalTurn(beforeGoal, "interrupted"));
 				return { submitted: true, snapshot: snapshot(), turnOutcome: "interrupted" };
 			}
 			if (error instanceof ObjectiveRootTurnErroredError) {
-				recordSubmittedTurn("errored");
+				this.recordContinuationPass(submittedGoalTurn(beforeGoal, "errored"));
 				this.recordContinuationFailure(error, beforeGoal.goalId);
 				return { submitted: true, snapshot: snapshot(), turnOutcome: "errored", turnError: error.message };
 			}
 			if (this.primaryRootTurns > before) {
-				recordSubmittedTurn(this.lastPrimaryTurnOutcome ?? "errored");
+				this.recordContinuationPass(submittedGoalTurn(beforeGoal, this.lastPrimaryTurnOutcome ?? "errored"));
 			}
 			this.recordContinuationFailure(error, beforeGoal.goalId);
 			throw error;
@@ -1268,7 +1250,12 @@ export class GoalSessionController {
 				return stop(after?.status === "budget_limited" ? "goal_budget_exhausted" : "continuation_not_allowed");
 			}
 			const route = controller.getLastRoute();
-			if (route?.route === "wait_for_worker" || route?.route === "wait_for_tool") return stop("worker_in_flight");
+			if (
+				route?.route === "wait_for_worker" ||
+				route?.route === "wait_for_tool" ||
+				once.snapshot.continuation.action === "waiting"
+			)
+				return stop("worker_in_flight");
 			const moved = once.submitted || this.deps.runtimeFacts().taskRuntime?.lastOrdinal !== revisionBefore;
 			idleCycles = moved ? 0 : idleCycles + 1;
 			if (idleCycles >= 2) {
@@ -1280,7 +1267,16 @@ export class GoalSessionController {
 		}
 	}
 
-	restoreAfterResume(): boolean {
+	restoreAfterResume(settings: GoalRuntimeSnapshotSettings): boolean {
+		const saved = this.getState();
+		if (reportGoalIdentityConflict(this.deps, saved)) return false;
+		const reviewed = saved && reopenUnprovenRequirements(saved, new Date().toISOString());
+		if (saved && reviewed && reviewed !== saved) this.saveState(reviewed, getGoalStateRevision(saved));
+		if (
+			reviewed?.status === "active" &&
+			parkExhaustedExecutor(this.terminalPort(() => this.getRuntimeSnapshot(settings)))
+		)
+			return false;
 		const resumedGoalId = this.resumeSystemBlockedGoal();
 		this.deps.scheduleGoalAutoContinueFromIdle();
 		return resumedGoalId !== undefined;
@@ -1294,7 +1290,7 @@ export class GoalSessionController {
 		const model = this.deps.getModel();
 		const classified = classifyFailure({ message, provider: model?.provider });
 		const status = classified.reason === "billing_or_quota" ? "usage_limited" : "blocked";
-		const refusedBy = PROVIDER_FAILURE_REASONS.has(classified.reason) ? model : undefined;
+		const refusedBy = isGoalProviderFailure(classified.reason) ? model : undefined;
 		const reason = `${classified.reason}: ${message}`;
 		harnessLog.warn("goals", "a goal continuation failed", { goalId, failure: classified.reason, stop: status });
 

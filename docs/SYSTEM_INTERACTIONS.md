@@ -56,6 +56,337 @@ proof. Negative controls are listed with each finding below.
 
 ## Findings and repairs
 
+### Parent wakes, history navigation and held calls, November 26
+
+A saved session recorded four `Parent input payload does not match its saved digest` errors. The five
+stored parent bodies matched their digests. An interrupted detached wake remained pending as later
+events of the same custom type arrived. The retry uses the exact original input as its opening, so
+those later events share its request window. The context pass treated the newer event as a replacement,
+packed the older body and left its digest in place. The outer parent-input projection then validated
+the edited body and stopped before transport. [Wake retry](../packages/coding-agent/src/core/parent-input-delivery.ts) · [Request projection](../packages/coding-agent/src/core/parent-input-projection.ts)
+
+| Shared thing and owner | Interacting actions and required behavior | Repair and control |
+| --- | --- | --- |
+| Canonical parent input body, owned by the session ledger | A wake retry exposes the saved input while context GC and compaction select older text to pack. The exact body must survive until the provider request is bound. | Both packing paths share the transient classifier. The semantic page path also preserves digest-bound parent deliveries. A later independent delivery of the same type leaves the older body intact. A genuine superseding record and an ordinary semantic page still pack. [Packing owner](../packages/coding-agent/src/core/context-gc.ts) · [Regression cases](../packages/coding-agent/test/context-gc-policy-snapshot.test.ts) |
+| Message and worker-log addresses, owned by the navigation parser | A model used quoted chat IDs for ranges and followed the refusal by removing the range. It then looked for a worker with that name. | A positive-length range accepts a quoted canonical decimal message ID. A quoted decimal ID without a range opens the numeric worker’s log if present, or the chat message otherwise. An absent later page of an existing worker stays a worker-page error. Invalid bounds stay rejected. [Navigation owner](../packages/coding-agent/src/core/memory/continuous-chat-navigation.ts) |
+| Held-call status, owned by the edge gate | A watch wake carried command output and correctly had third-party authority. The model then told the owner that replying would run the saved drafts. | The gate and owner notices say that a fresh call needs authority. Watch guidance states the trust effect of a command or HTTP excerpt. Draft approval and grants retain their existing scope. [Edge guidance](../packages/coding-agent/src/core/agent-session-edge.ts) |
+| Expert selection failure, owned by objective execution | The no-candidate path gave the delivery bundle detailed rejection codes and returned a generic code to the goal status. | Both consumers receive the same distinct reason codes. A rejection with no candidate details still carries the base code. [Terminal result](../packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts) |
+
+The greeting also prompted work recalled from an earlier conversation. The continuous-chat prompt
+now ties resumed work to an owner request or a host continuation. Goal evidence, lookup and watch
+descriptions show the expected arguments after the session submitted missing or misplaced fields.
+These are model guidance changes. The incorrect edit anchors, missing paths and nonzero shell
+exits were consistent with the recorded calls and their validation rules. The transcript retains
+only the generic expert rejection code, which leaves the candidate reasons unknown.
+
+The transcript establishes the original failures. The standalone conversation journey exercises
+navigation and compaction with System One enabled and disabled. [Conversation journey](../packages/coding-agent/test/fixtures/harness/journeys/journey-1.ts)
+
+The host now records a held draft as released when the matching tool call starts. A later
+gate refusal or a discarded preparation leaves the draft held. New holds identify the full
+call even when several commands share the same operation description. Older records without
+call arguments use their recorded operation digest. One start can retire several matching
+drafts in one receipt. Older readers recognize only the first draft in that receipt.
+The tool result records the outcome. [Draft lifecycle](../packages/coding-agent/src/core/autonomy/owner-draft-decisions.ts) ·
+[Start and branch regressions](../packages/coding-agent/test/outward-draft-start.test.ts)
+
+On a detached retry, Pi filters the old request window before selecting held notes. A new
+owner steer can still share a response with the wake. Prior branch and compaction summaries
+carry their source entry identity through projection. Pending and skipped parent inputs stay
+out of new summaries, including when the summarizer could reuse a previously sent prefix.
+Summaries committed by an older version may still contain those inputs. The host declines
+durable compaction when the retry window skips intervening conversation that a contiguous
+checkpoint would erase. If this window exceeds the provider budget, Pi reports the constraint.
+
+Retrieval records the executor when Pi submits the root prompt or the scheduler starts the
+worker. A queued worker keeps its assignment. A route that allows foreground work can fall
+back to the root if every worker declines. Previews, queue entries and waits leave prior
+attempts visible to the repeat detector. New evidence or a change in targeted work can reset repetition.
+New route-created worker attempts retain the originating session, objective, cycle and executor.
+Recovery can credit the existing route after the worker journal records that the attempt started,
+even if Pi exited while the worker was still queued. Granting a lease alone leaves the route
+uncredited. Older attempts without a recorded origin remain unattributed.
+The queue recovery journey captures the worker journal and the decision database while the worker
+is queued. The reopened host must credit the original decision after the worker runs. A second
+recovery must leave the provider request count unchanged. The recorded user session has not been replayed.
+[Queue recovery journey](../packages/coding-agent/test/fixtures/harness/journeys/journey-2-queued-recovery.ts)
+
+The orchestration journey exposed two separate failures at goal completion. A running worker and
+an unresolved verification blocked the same call, but generic tool-error formatting dropped a
+reason before the model saw it. Completion refusals now return the full decision. When both
+blockers cleared, the successful goal write used to abort its own foreground turn after the proof
+sheet was saved. The completing turn must deliver one tool-free answer from that receipt.
+A later tool in the same batch has no authority to run. Owner cancellation, replacement or
+amendment can still interrupt the answer. When the provider ignores the interruption, Pi
+discards its late text and the obsolete turn cannot issue a judgment about the amended goal.
+Pi consumes the one allowed report when it dispatches the request. Replanning before dispatch
+preserves that permission. The provider sees the reporting instruction in the receipt, keeping
+the system prompt stable. The cache trace records the tool-free request and compares the next
+ordinary request against the preceding ordinary tool set. [Report lifetime journey](../packages/coding-agent/test/fixtures/harness/journeys/journey-2-goal-report-lifetime.ts) · [Orchestration journey](../packages/coding-agent/test/fixtures/harness/journeys/journey-2-orchestration.ts)
+
+The mixed-worktree journey also checks that the provider receives the entire published receipt,
+including the literal paths of files the checks missed. Request preparation compares the current
+projection with the captured receipt before it can reuse an older request. [Mixed-worktree journey](../packages/coding-agent/test/fixtures/harness/journeys/journey-3-worktree-and-gates.ts)
+
+All twelve registered harness journeys passed locally across focused runs with System One enabled
+and disabled. They used scripted providers and the virtual process and filesystem fixtures.
+The orchestration run included the checkpoint reopen, queued-worker recovery and the three ways
+an owner can interrupt a completed goal's final report. [Registered journeys](../packages/coding-agent/test/harness-interactions.test.ts)
+
+### Causal follow-up on the November 26 session
+
+The read-only audit correlated the transcript, watch ledger, and session-scoped decision ledger
+with the current source. The first goal stop preceded every digest error. The highest-impact
+incorrect state change was a live-validation requirement marked satisfied before the live run.
+
+| Shared thing | Interacting actions | Witness and negative control |
+| --- | --- | --- |
+| Requirement proof and watch binding | File evidence admission verifies the locator. Goal settlement treats the resulting evidence flag as proof of the named requirement. The scheduler subsequently considers watches only for requirements that remain open. | At 18:13:58 UTC the goal transaction saved a verified installation manifest and satisfied a requirement that also demanded observed recovery and sustained movement. The cited evidence described staging and static checks. The recorded live validation remained pending. A manifest for an installation-only requirement has the right scope. A missing file fails locator admission. [File evidence](../packages/coding-agent/src/core/goals/file-evidence.ts) · [Combined transaction](../packages/coding-agent/src/core/tools/goal.ts) · [Watch eligibility](../packages/coding-agent/src/core/goals/goal-continuation-controller.ts) |
+| Objective executor eligibility | Cost comparison chooses a discretionary executor before expert selection. The execution controller publishes the worker choice and converts a worker admission refusal into an objective terminal. | The decision ledger records a worker-priced investigation at 17:24:41 UTC and the goal blocked a second later. It records the same route on the foreground at 18:24:58, then a worker choice followed by the same goal stop at 18:35:36. An independent review actually requires an independent executor and cannot be fulfilled by the root. [Price projection](../packages/coding-agent/src/core/session-cache-controller.ts) · [Executor dispatch](../packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts) · [Goal settlement](../packages/coding-agent/src/core/goals/goal-objective-terminal.ts) |
+| Retrieval progress and repetition | Retrieval builds a whole-objective brief when the route has no requirement targets. The progress marker increases for task and attempt creation, and the repeat detector compares route reasons. | Two retrievals issued identical read-only briefs and ended with partial handoffs and zero accepted coverage. The route marker changed from 1000 to 1011 and then to 1022 as tasks and attempts were created. The two retrieval diagnostics also differed, which independently prevents a match. Newly accepted evidence would be a legitimate change to the marker. [Brief construction](../packages/coding-agent/src/core/minion-gathering.ts) · [Progress marker](../packages/coding-agent/src/core/objective-execution/ledger-route-checkpoints.ts) · [Repeat detection](../packages/coding-agent/src/core/objective-execution/objective-route-projector.ts) |
+| Goal wait and runnable work | The scheduler sees goal-bound watches. The primary objective router composes routes without requirement-level wait facts. | A watch was live and bound when the first investigation stopped its goal. The transcript has eight open requirements at that point, with only one watched and no declared dependency edges. Other work could be runnable. A goal whose every open requirement has a live watch is already held by the scheduler’s stable-state gate. The missing fact is which requirements an admitted route may advance. [Watch gate](../packages/coding-agent/src/core/goals/goal-continuation-controller.ts) · [Primary continuation](../packages/coding-agent/src/core/goals/goal-session-controller.ts) · [Route composition](../packages/coding-agent/src/core/objective-execution/objective-route-policy.ts) |
+| Detached wake membership and order | The session ledger reuses the outstanding wake. The ICM planner opens at that wake’s original input and includes the branch suffix from there. | Two wakes bound 34 and 13 provider requests respectively. The second was interrupted, then retried after an intervening owner turn and more events. Its authorization still named the original manifest while its conversation window included later work. With the wake at the tail, this mismatch is absent. The earlier packing repair preserves the body but leaves this selection rule intact. [Manifest admission](../packages/coding-agent/src/kernel/session/session-manager.ts) · [Wake opening](../packages/coding-agent/src/core/parent-input-delivery.ts) · [ICM request window](../packages/coding-agent/src/core/memory/continuous-chat-projection.ts) |
+| Watch delivery custody | The producer supplies a durable owed/stop guard. Steered acceptance queues the message without carrying that guard to the canonical append. | A wake can wait for a running turn and become settled before steering flushes. The active-turn path still supplies the message to persistence. The detached path applies the producer’s guard under the transcript lock. The transcript shows both delivery modes but does not establish a stop race in this session. [Producer guard](../packages/coding-agent/src/core/routines/routine-parent-input.ts) · [Steering](../packages/coding-agent/src/core/parent-input-steer.ts) |
+| Worker watch provenance | The watch constructs event authorship. The worker adapter passes text and a key, then the mailbox derives origin from the current sender. | The same result preserves its origin on the root delivery path. Source review shows the worker delivery can lose that origin. The transcript documents the root path and does not show this worker case. [Watch delivery](../packages/coding-agent/src/core/watches/session-watch-service.ts) · [Worker adapter](../packages/coding-agent/src/core/routines/routine-runtime-assembly.ts) |
+
+The first refactor belongs at objective admission and settlement. Requirement coverage needs a
+decision of its own, tied to the evidence and requirement revision. A route needs the runnable
+requirement set and actual executor eligibility before it is priced. Accepted evidence and
+execution attempts need separate identities for progress and repeated-work detection.
+
+The wake refactor belongs at parent delivery. Both modes need one guarded acceptance path that
+retains event provenance. A detached retry needs a request window selected from the manifest
+and the retry’s own exchanges. The recorded timings and state transitions are historical
+evidence. The cross-mode race cases remain source-supported and unproven at runtime.
+
+#### Repair contracts
+
+| Owner | Decision | Admission and recovery |
+| --- | --- | --- |
+| Goal acceptance | An observation identifies a source. Coverage names the current requirement and the accepted citations that prove it. | A positive check is scoped to the definition whose check ran. Native dispatch captures the exact definitions that its worker can cover. General citations are judged using the observed operation, outcome, and bounded output, or the exact owner statement. A cancelled or stale judgment leaves acceptance untouched. An evidence write can remain useful while the requirement stays open. |
+| Goal continuation and objective routing | The current goal supplies the runnable requirement set. A live watch owns the wait for its requirement and its dependent work. | Root briefs, worker admission and retrieval use the runnable set. Foreground-capable routes can be readmitted after expert selection or worker admission definitively refuses a start. Independent work retains its executor requirement. |
+| Route ledger | Record the requested work, accepted evidence, and actual execution separately. | A new attempt can change diagnostics while the progress identity stays stable. Repetition compares the work and progress identities. Older ledger rows remain readable without serving as equivalent new work. |
+| Parent input | Canonical custody establishes which delivery may run and whose words it carries. | Both delivery modes check the producer guard under the transcript lock. A declined steer settles its exact queue occurrence before it can enter provider history. A restarted detached run uses its manifest and the exchanges the manifest owns. Worker mail persists event origin as part of the admitted message. |
+
+On resume, unfinished goals reopen satisfied requirements that lack accepted coverage. Completed
+history keeps the receipts recorded by earlier versions. An older worker dispatch without
+definition keys can cover a requirement only when retained goal events establish its unchanged
+definition and its task belongs to the same objective. Amended requirements require newly scoped
+proof. An independent verdict on a multi-requirement task still needs coverage for each criterion.
+With System One unavailable, an attached host check or accepted scoped worker proof can still
+satisfy a requirement. A host check measures the acceptance condition declared in its command.
+
+Regression cases exercise coverage, worker refusal, watch dependencies, detached retry isolation,
+and discarded queue entries. This checkout uses source review, type checking, and static repository
+gates. Runtime verification remains pending.
+
+#### Design review of the November 26 repairs
+
+At 16:53:02 UTC the owner sent a greeting. Five history lookups and a shell call followed before
+the next owner message. At 18:13:58 the ledger accepted staging evidence for a requirement that
+included live recovery. The first recorded goal stop also preceded the first digest error.
+These observations establish distinct failures in choosing work, accepting its outcome, and
+delivering a later wake. They do not establish one runtime cause for the entire session.
+
+The earlier change gave a requirement and its supporting citations an identity. Several consumers
+decided what an observation means, whether it remains current, and whether work may proceed
+from less information than the writer had. The following paths were reachable before this
+implementation. Attribution to the recorded session is limited to the observations above and the
+preceding investigation.
+
+| Shared decision | Interacting actions and source-supported consequence | Control |
+| --- | --- | --- |
+| What work the owner requested | History guidance ties resumption to an owner request. The model-facing goal start accepts the proposed objective and its host grant supplies a budget and owner source without comparing the objective to the request. Similarly, an amendment checks that the old objective's words occur in the proposed text and that the quoted message came from the owner. Neither predicate establishes that the owner requested the added outcome. The greeting itself preceded goal creation. [History guidance](../packages/coding-agent/src/core/memory/continuous-chat-prompt.ts) · [Start grant](../packages/coding-agent/src/core/goals/goal-session-controller.ts) · [Amendment](../packages/coding-agent/src/core/tools/goal.ts) | An owner can explicitly resume remembered work. A legitimate follow-up must be able to refer to an earlier proposal. |
+| What a passing check proves | The goal tool accepts a model-selected observational command. On its expected exit, the check writer grants scoped evidence and satisfies the requirement before final goal review. A directory query can therefore mark a service-recovery requirement satisfied and remove it from the scheduler's open work. The definition hash binds the selected check to the text without assessing whether the command measures that text. [Check admission and result](../packages/coding-agent/src/core/goals/requirement-checks.ts) · [Proof writer](../packages/coding-agent/src/core/goals/prove-requirement-checks.ts) · [Open work](../packages/coding-agent/src/core/goals/goal-continuation-controller.ts) | A directory query can establish the working directory. A compound recovery requirement needs observations covering recovery and the required interval. |
+| Which proof is current | Replacing a check clears the requirement's proof. The reviewer's verification projection joins its latest check receipt by requirement ID and pairs that result with the *current* command. Between replacement and the next run it can display the new command as passed. Objective synchronization also only adds accepted evidence. After withdrawal the routing projection still presents the old criterion as fresh. Separately, the reviewer publishes model-written evidence summaries as authoritative observations when their locator was verified. [Invalidation](../packages/coding-agent/src/core/goals/goal-state.ts) · [Reviewer](../packages/coding-agent/src/core/system-one/canonical-truth.ts) · [Synchronization](../packages/coding-agent/src/core/orchestration/delegation-ledger.ts) · [Routing projection](../packages/coding-agent/src/core/objective-execution/objective-route-projector.ts) | A receipt for the unchanged definition can support the same claim. A previous observation belongs in history even after its authority to establish current coverage ends. |
+| Whether completion can use an earlier positive result | A failing rerun reopens a requirement and retains the passing and failing receipts. Satisfaction can reselect the old pass because it filters the supplied citations and accepts any successful scoped check for that definition. Separately, a final `increment` expands to `complete` inside the reducer, after the tool has selected explicit `complete` calls for a fresh check run. The later completion gates can still refuse, but this entry path skips the required measurement. [Check persistence](../packages/coding-agent/src/core/goals/prove-requirement-checks.ts) · [Action expansion and scoped proof](../packages/coding-agent/src/core/goals/goal-tool-core.ts) · [Completion entry](../packages/coding-agent/src/core/tools/goal.ts) | Explicit completion reruns the check. A genuine newer pass after the failure can restore coverage. |
+| How much work an executor refusal blocks | When expert selection finds no eligible reviewer or worker admission definitively declines the review, dispatch returns an unrecoverable objective terminal. Settlement blocks the active goal without evaluating which other requirements can run or have an outstanding watch. The earlier foreground fallback only covers work that admits a foreground executor. [Route dispatch](../packages/coding-agent/src/core/objective-execution/objective-route-execution.ts) · [Refusal construction](../packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts) · [Goal stop](../packages/coding-agent/src/core/goals/goal-objective-terminal.ts) | The review must wait for an eligible independent executor. A goal whose only remaining obligation is that review can legitimately wait as a whole. |
+| Whether an approval or execution is still authorized | A completion question identifies a goal and revision. On return the settlement reads the latest active state with that ID and applies the owner's answer to it. An amendment can therefore inherit an approval for the previous objective. The primary cycle also guards delivery effects by current goal ID. Pausing a goal while a judgment is pending leaves that ID current at the delivery guard. [Owner answer](../packages/coding-agent/src/core/goals/goal-objective-terminal.ts) · [Cycle entry](../packages/coding-agent/src/core/goals/goal-session-controller.ts) · [Identity guard](../packages/coding-agent/src/core/objective-execution/current-objective-execution.ts) · [Delivery guard](../packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts) | Replacing the goal ID rejects the old decision. Accounting updates should preserve an otherwise valid approval. |
+
+**Design for goal admission, proof, and settlement**
+
+1. At request admission, bind proposed work to the current owner input, an applicable standing
+   goal, or a host continuation with explicit scope. Reuse the ordinary-work request and the
+   existing owner-evidence ledger. Preserve an owner's ability to refer to earlier work and to
+   delegate planning. A greeting can open a conversational turn without authorizing a recalled
+   objective. Check the requested change when admitting an amendment. Save the accepted
+   objective and its initial required outcomes in one transaction. Today `create_goal` saves
+   the start and then each requirement individually. Two identical requirement texts generate
+   the same ID, so the second can fail after the goal and first requirement are already durable.
+2. Give goal acceptance sole ownership of current coverage. Keep the host's observation,
+   the model's interpretation, and the decision that the observation covers the criterion as
+   distinct records. Bind a decision to the exact definition and observed result. A host check
+   can directly establish a condition explicitly specified by the owner or a trusted built-in
+   contract. For a model-proposed check, establish which clauses its success measures before
+   granting coverage. If coverage cannot be established, retain the result and expose the
+   outstanding clauses. A later contradictory result for the same condition invalidates the
+   earlier pass. Independent worker observations use the same current-coverage read path.
+3. Keep historical receipts append-only and derive a single current view for scheduling, routing,
+   progress, review, and completion. Propagate withdrawal to any durable mirror, including after
+   restart between the goal write and synchronization. Readers can compare the projection's
+   definition and proof revision to its source and rebuild it before making a decision. A watch
+   may still deliver a historical observation after an amendment. Only a watch whose condition
+   applies to the current definition may hold its work. Preserve independent objective evidence
+   under its existing owner. Record an executor refusal against the work that required it.
+   Derive the goal's ability to continue from the remaining runnable requirements and pending
+   external events. Preserve the independent-review requirement across that decision.
+4. Normalize the requested action before choosing its checks. Route final increment, explicit
+   completion, and objective-loop completion through one settlement operation. Capture the goal,
+   definition, execution generation, and applicable proof revision before waiting. Recheck them
+   at settlement and immediately before dispatch or delivery. Pause, cancellation, replacement,
+   and resume invalidate the old execution generation. Record an in-flight result against its
+   original execution even if it arrives late. Budget accounting and an unrelated note should
+   not invalidate proof. An explicit owner override carries the scope the owner actually saw.
+
+Implement current coverage and its consumers first. That slice addresses the recorded
+misclassification and defines the evidence contract for the other changes. Next unify completion
+and guard delayed effects, then bind work admission to the current request. Parent delivery keeps
+its own manifest and append guard. Its byte-integrity incident already has a separate causal
+trace. Navigation coercion and ordinary command errors likewise have no demonstrated dependency
+on goal settlement.
+
+**Acceptance scenarios for the refactor.** Follow one goal through staging, a live watch,
+recovery, and completion. A manifest can close the staging requirement while the live watch
+continues. Refuse an independent reviewer while unrelated work can still run. Then replace
+the live check, obtain a pass followed by a failure, restart, and read
+the scheduler, route, review, and goal views. All four should show the same outstanding work.
+Exercise both completion entry points and both semantic-provider modes. Pause and resume while
+a delivery awaits judgment, amend while an owner approval is outstanding, and repeat each
+with an accounting-only update. Compare a greeting with an explicit request to resume the
+same remembered work. These are proposed regressions. This review inspected the recorded
+transcript and source and did not execute them.
+
+#### Executor and watch implementation follow-up
+
+A route assignment now selects one ready requirement and carries that scope into the worker's
+instructions and task context. Definitive independent-executor refusals are saved on the exact
+requirement definition through the goal reducer. The first two admissions receive a 60-second
+retry boundary. The third holds the affected requirement for owner recovery. Other ready
+requirements and current watches continue. A missing or invalid assignment scope receives one
+root replan and a bounded objective hold. Attempts and diagnostic wording do not reset these
+counts. Owner resume releases the host-established admission blocks.
+
+A watch records the definition it was armed for. The service rechecks it after asynchronous
+admission and filters applicable records before selecting the latest watch. Newly proposed wait
+bindings also require a supported judgment that the watched condition observes a necessary
+outstanding part of the requirement. With System One unavailable or an unsettled judgment, the
+watch remains an observational delivery and the owner is told that it has no requirement wait
+authority. Previously approved bindings remain readable. Keyless historical bindings require a
+retained unchanged requirement definition. Outside-wait judgments use the same definition key.
+
+Goal-to-objective evidence synchronization now recognizes its own records by reconstructed
+identity and source metadata. Simple legacy identities retain their spelling. Tuples containing
+separators or exceeding the durable identifier bound use a tuple digest. Independent evidence
+with a similar prefix keeps its own authority. Queue admission and synchronization share one
+preflight of planned withdrawals, retained evidence, complete metadata, collection headroom,
+and retained projection bytes before either writes. The canonical reviewer takes current goal
+text and even an empty requirement set directly from the goal.
+Objective persistence and restore now share the goal admission bound of 256 acceptance criteria.
+Unrelated orchestration collections retain their existing bounds.
+
+These changes were checked through source review, TypeScript, formatting, and repository static
+checks. Runtime behavior, deadline recovery, and provider-off composition remain unverified.
+
+#### Goal admission, proof, and settlement implementation
+
+The goal tool now validates the initial objective and requirements before its first save. A start or
+amendment reads the current owner's words. A new requirement reads the standing objective. An exact
+request can proceed without the semantic service. A standalone greeting also bypasses automatic goal
+intake and the implicit resumption of a stopped goal.
+
+A check run persists its observation before a coverage decision. The latest run of the current definition
+controls its eligibility. A model-proposed check needs an independent judgment that its result covers the
+criterion. An exact command and expected outcome stated by the owner for this goal can supply the
+contract directly. Superseded evidence remains in history. Synchronizing the objective withdraws obsolete
+or changed goal receipts before projecting current ones. Unfinished goals with older acceptance records
+need current proof. The historical completion reader preserves previously accepted, verified receipts.
+
+The final increment and explicit completion run the same fresh checks. Objective completion checks
+the same live work and verification obligations before delivery and settlement. A changed goal execution
+invalidates outstanding admissions, including delayed worker launches and owner answers. The terminal
+store also checks admission after its asynchronous notification hook. Accounting alone leaves the
+execution generation intact.
+
+The regression cases cover a superseded pass, an amended watch, declined dispatch, exhausted review
+with an independent sibling, an obsolete owner answer and an accounting-only control. The checkout
+has undergone source review and static verification. The original session has not been replayed.
+[Regression cases](../packages/coding-agent/test/requirement-coverage.test.ts)
+
+#### Further proof-lifecycle review
+
+A passing host check on A can legitimately help prove B. When a later measurement replaced A’s
+receipt, B kept its satisfied flag and could unlock a dependent. Check and definition changes
+now withdraw affected acceptance in the same goal transaction. A completion rerun submits
+previously accepted cross-requirement bundles for a fresh coverage decision against the replacement
+receipts. A failed or unavailable decision leaves the consumer open. Changes to a check also carry
+a revision so replacing a definition twice in one clock tick cannot revive an earlier binding.
+Older journal batches retain their original definition identity during replay. An unfinished goal
+needs a new measurement if an older receipt does not identify its execution source.
+
+The host can record a failure with all 512 ordinary evidence slots occupied. The current goal keeps
+one latest measurement per checked definition. The branch journal retains superseded observations
+and guards against replay of a worker attempt after its receipt leaves the snapshot. A requirement
+check evaluates text predicates throughout the command’s output, including across chunks.
+Only its diagnostic tail is retained. A failed check preserves an explicit block on the requirement.
+
+Worker proof follows the current turn of its logical lane, including managed lanes that create a
+different task for each turn. A delayed check must still belong to the same goal execution and
+measurement when it writes. Claims from another accepted lane can remain valid. Journal writes
+also compare their captured goal snapshot, so two branches reaching the same revision number
+with different evidence cannot authorize each other’s writes.
+[Worker lifecycle regressions](../packages/coding-agent/test/worker-goal-proof-lifecycle.test.ts)
+
+The goal journal owns the complete citations. The objective keeps one current acceptance record per
+satisfied requirement. Sharing 12 receipts across 43 criteria now takes 43 objective records. Each
+record identifies the goal lifetime, requirement definition and accepted proof. The objective has
+room for 256 such records alongside its existing allowance of 512 independent receipts. Longer
+criterion descriptions have a byte-bounded display excerpt. Reviewers read the complete goal text.
+
+Reconciliation writes the objective metadata, coverage replacements, withdrawals and lifecycle
+transition in one event. The reducer validates the result, including cancellation of dependent work,
+before appending it. A refused update leaves the prior objective intact. The 1 MiB objective and
+24 MiB aggregate limits still apply. The objective can lag the goal after a storage refusal. The
+session reports the failure and the live router reconciles again before evaluating that objective.
+Older goal mirrors migrate on reconciliation. Independent records with similar identifiers keep their
+identity. Older binaries cannot replay the new event or read snapshots above their 512-row limit.
+Rolling back after a migrated write requires a compatible reader or a pre-upgrade copy of the session.
+
+The live router now counts the selected objective’s tasks and attempts. A receipt supports a routing
+criterion only if it is trusted and explicitly linked to that criterion. A pending task keeps a
+criterion-free objective open. When worker proof expires, a refusal to run its replacement is charged
+to the affected requirement. New goals must have fresh IDs so they cannot inherit a previous goal’s
+terminal objective, independent evidence or workers. If an older session records two lifetimes for
+one ID, Pi holds new goal-driven work on that ID. The owner can clear the ambiguous goal and start with a fresh ID
+without cancelling work on the older objective. These additional failure paths were identified
+in source review. Their occurrence in the November 26 session has not been verified.
+
+Editing a completed goal used to reactivate its goal record while leaving its worker objective
+terminal. `/goal edit` now records which completion the owner corrected. The goal and objective
+keep their identity and finished worker history. Journal ancestry fences retries and branch changes.
+Each requirement earns acceptance again. A separate review checks the full amended wording against
+the accepted outcomes and direct observations, including when the goal has zero or 256 requirements.
+An owner can still close the goal manually. Delivery certificates and terminal proof identify the
+correction even when the candidate tree is identical to the one previously accepted.
+After a restart, an owner edit reaches an existing worker journal before the worker fleet loads.
+Clearing waits for the terminal state to reach that journal. A failed write leaves the completion
+or cancellation available for retry.
+[Owner command](../packages/coding-agent/src/modes/interactive/session-flow-commands.ts) ·
+[Objective reconciliation](../packages/coding-agent/src/core/orchestration/goal-objective-reconciliation.ts)
+
+The first goal checkpoint in a persistent session also opens its work unit, so a short write cannot leave a separate declaration on disk. The host flushes that checkpoint before bootstrap. Historical declarations require a matching goal on the branch.
+A cancellation revokes the execution signal when the session records it, including when the worker
+journal then refuses the write. Changing a requirement definition releases its old worker binding.
+A worker measurement can survive a branch change, but acceptance requires the branch that recorded it.
+Tool citations preserve quoted filenames and Python source. Reviewing saved evidence requires the original call ID. A corrected outcome's twelve-observation
+limit applies to available host observations. Owner activations survive eviction from the goal's
+event window, so a delayed stop can be ordered against the owner's last edit or resume after restart.
+Older checkpoints recover that order and correction authority from retained journal entries.
+These paths were identified in source review. The prepared regressions have not been run.
+
+[Proof and check regressions](../packages/coding-agent/test/requirement-coverage.test.ts) ·
+[Retention and replay regressions](../packages/coding-agent/test/goal-check-retention.test.ts) ·
+[Projection and output regressions](../packages/coding-agent/test/goal-proof-projection.test.ts)
+
 ### Python bridge receipts and private memory handoff, November 23
 
 A memory update used raw Python to write files, so the final claim had no host file-change receipt. The initial bridge patch missed raw writes and lost settled child evidence when the parent script failed. The prompt now directs file changes through typed edit and write tools. Python passes bounded, host-observed bridge evidence through the existing result and failure receipt paths. Foreground and worker consumers account for settled writes independently of the parent status. Raw Python, read-only calls, and invalid reports supply no write receipt. [Bridge](../packages/coding-agent/src/core/tools/tool-bridge.ts) · [Receipt regression](../packages/coding-agent/test/python-bridge-claim-receipts.test.ts)

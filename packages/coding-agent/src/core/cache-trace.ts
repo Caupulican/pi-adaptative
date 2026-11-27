@@ -51,6 +51,13 @@ const CACHE_TRACE_LIMITS = {
 	lockRetries: 0,
 };
 
+const toolFreeRequests = new WeakSet<Context>();
+
+/** The host authorized this exact wire request to withhold its tools for one response. */
+export function markToolFreeCacheRequest(context: Context): void {
+	if (!context.tools?.length) toolFreeRequests.add(context);
+}
+
 type SegmentFingerprint = [label: string, hash: string, chars: number];
 
 function segment(label: string, value: unknown): SegmentFingerprint {
@@ -302,7 +309,12 @@ export class PromptPrefixMonitor {
 		const previous = this.previous.get(key);
 		const systems = this.lineageSystems.get(key) ?? new Map<string, LineageSystem>();
 		const system = systems.get(lineage);
-		const current = fingerprintRequest(model, context, previous, system);
+		const wire = fingerprintRequest(model, context, previous, system);
+		// Keep the ordinary tool baseline across a host-authorized empty surface. The trace records the wire.
+		const current =
+			previous?.model === wire.model && wire.tools.length === 0 && toolFreeRequests.has(context)
+				? { ...wire, tools: previous.tools, harnessDeferred: previous.harnessDeferred }
+				: wire;
 		systems.set(lineage, { model: current.model, system: current.system, systemText: current.systemText });
 		this.lineageSystems.set(key, systems);
 		const viewChange =
@@ -312,7 +324,7 @@ export class PromptPrefixMonitor {
 			previous.model === current.model
 				? compareContinuousChatCache(previous.view.cache, current.view.cache)
 				: undefined;
-		this.writeTrace(sessionId, conversationId, current, viewChange?.rewrite);
+		this.writeTrace(sessionId, conversationId, wire, viewChange?.rewrite);
 		this.previous.delete(key);
 		this.previous.set(key, current);
 		while (this.previous.size > MAX_TRACKED_CONVERSATIONS) {

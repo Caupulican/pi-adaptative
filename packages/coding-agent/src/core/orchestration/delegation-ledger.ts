@@ -10,7 +10,9 @@ import {
 	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
 	parseHostEventSubscriptionInput,
 } from "../events/host-event-contract.ts";
-import { getGoalCompletionRefusal, hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
+import { getGoalCompletionRefusal, hasGoalAcceptanceOverride, requirementKey } from "../goals/goal-acceptance.ts";
+import type { GoalSourcePosition } from "../goals/goal-correction-contract.ts";
+import { hasCurrentCorrectedOutcomeProof } from "../goals/goal-correction-proof.ts";
 import { type GoalState, isGoalExecutionActive, isGoalStoppedStatus } from "../goals/goal-state.ts";
 import { type KnowledgeGrantReference, parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import { agentBasisTurnOrigin, agentNativeTurnCount, agentTurnBasis } from "./agent-turn-basis.ts";
@@ -31,13 +33,17 @@ import {
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	objectiveTakesNewWork,
 } from "./contracts.ts";
+import { assertObjectiveRouteOwner, objectiveRouteOriginFields } from "./dispatch-request-fields.ts";
 import { OrchestrationEventStore } from "./event-store.ts";
+import { sourceGoalId } from "./goal-objective-id.ts";
+import type { GoalObjectiveSource } from "./goal-objective-reconciliation.ts";
 import { assertModelTransferAllowsNewAgentTurn, type ModelTransferDispatch } from "./model-transfer.ts";
 import { assertTaskAttemptBudgetForState } from "./risk-budget.ts";
 import {
 	type AttemptRuntimeState,
 	DurableTaskRuntime,
 	DurableTaskRuntimeError,
+	type TaskRuntimeProjection,
 	validateTaskDependencyIds,
 } from "./task-runtime.ts";
 import { goalObjectiveId, projectGoalAcceptanceEvidence, projectGoalObjective } from "./work-state-projection.ts";
@@ -87,9 +93,12 @@ export interface DelegationLedgerOptions {
 	sessionId: string;
 	now?: () => number;
 	store?: OrchestrationEventStore;
+	assertGoalIdentity?: (goal: GoalState | string) => void;
+	goalSourcePosition?: (goal: GoalState) => GoalSourcePosition | undefined;
 }
 
 export interface PrepareDelegationInput {
+	objectiveRouteOrigin?: OrchestrationDispatchRequest["objectiveRouteOrigin"];
 	modelTransfer?: ModelTransferDispatch;
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	subscriptions?: readonly HostEventSubscriptionInput[];
@@ -152,6 +161,7 @@ export interface StartedDelegationAttempt {
 }
 
 export interface PrepareAgentTurnInput {
+	objectiveRouteOrigin?: OrchestrationDispatchRequest["objectiveRouteOrigin"];
 	/** A new task starts empty; only an explicit current selection grants knowledge. */
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	subscriptions?: readonly HostEventSubscriptionInput[];
@@ -238,8 +248,14 @@ function withoutRouteProvenance(
 }
 
 function dispatchEvidence(
-	input: Pick<PrepareDelegationInput, "knowledgeReferences" | "subscriptions" | "receiptOrigin" | "turnOrigin">,
-): Pick<OrchestrationDispatchRequest, "knowledgeReferences" | "subscriptions" | "receiptOrigin" | "turnOrigin"> {
+	input: Pick<
+		PrepareDelegationInput,
+		"knowledgeReferences" | "subscriptions" | "receiptOrigin" | "turnOrigin" | "objectiveRouteOrigin"
+	>,
+): Pick<
+	OrchestrationDispatchRequest,
+	"knowledgeReferences" | "subscriptions" | "receiptOrigin" | "turnOrigin" | "objectiveRouteOrigin"
+> {
 	const knowledgeReferences = parseKnowledgeGrantReferences(input.knowledgeReferences ?? []);
 	const subscriptions = hostEventArray(
 		input.subscriptions ?? [],
@@ -248,6 +264,7 @@ function dispatchEvidence(
 		"task subscriptions",
 	);
 	return {
+		...objectiveRouteOriginFields(input.objectiveRouteOrigin),
 		...(knowledgeReferences.length ? { knowledgeReferences } : {}),
 		...(subscriptions.length ? { subscriptions } : {}),
 		...(input.receiptOrigin ? { receiptOrigin: input.receiptOrigin } : {}),
@@ -258,9 +275,13 @@ function dispatchEvidence(
 export class DelegationOrchestrationLedger {
 	readonly runtime: DurableTaskRuntime;
 	private readonly sessionId: string;
+	private readonly assertGoalIdentity?: (goal: GoalState | string) => void;
+	private readonly goalSourcePosition?: (goal: GoalState) => GoalSourcePosition | undefined;
 
 	constructor(options: DelegationLedgerOptions) {
 		this.sessionId = options.sessionId;
+		this.assertGoalIdentity = options.assertGoalIdentity;
+		this.goalSourcePosition = options.goalSourcePosition;
 		this.runtime = new DurableTaskRuntime({
 			store:
 				options.store ??
@@ -271,6 +292,24 @@ export class DelegationOrchestrationLedger {
 				}),
 			now: options.now,
 		});
+	}
+
+	/** A routed admission can only file work under the live objective the host decision actually names. */
+	assertRoutedObjective(
+		origin: OrchestrationDispatchRequest["objectiveRouteOrigin"],
+		objectiveId: string,
+		snapshot?: TaskRuntimeProjection,
+	): void {
+		if (!origin) return;
+		assertObjectiveRouteOwner(origin, this.sessionId, objectiveId);
+		if (!objectiveTakesNewWork((snapshot ?? this.runtime.getSnapshot()).objectives[objectiveId]?.objective))
+			throw new DurableTaskRuntimeError("Routed worker requires its existing active objective.");
+	}
+
+	private assertObjectiveGoalIdentity(objectiveId: string, goal?: GoalState): void {
+		if (goal) this.assertGoalIdentity?.(goal);
+		const id = sourceGoalId(objectiveId);
+		if (id && id !== goal?.goalId) this.assertGoalIdentity?.(id);
 	}
 
 	prepare(input: PrepareDelegationInput): AttemptRuntimeState {
@@ -322,6 +361,9 @@ export class DelegationOrchestrationLedger {
 			transfer.successorAgentId !== binding.successorAgentId
 		)
 			throw new DurableTaskRuntimeError("Model transfer dispatch is unrelated to the reserved command.");
+		const objectiveId = snapshot.tasks[source.taskId]!.task.objectiveId;
+		this.assertRoutedObjective(input.objectiveRouteOrigin, objectiveId, snapshot);
+		this.assertObjectiveGoalIdentity(objectiveId, input.goal);
 		const turnOrigin = conversationTurnOrigin(snapshot, source);
 		const evidence = dispatchEvidence({ ...input, ...(turnOrigin?.thirdParty ? { turnOrigin } : {}) });
 		return this.runtime.modelTransfers.admit(binding.taskId, binding.sourceAttemptId, binding.commandId, {
@@ -330,6 +372,7 @@ export class DelegationOrchestrationLedger {
 			instructions: input.instructions,
 			resourcePointerIds: source.dispatch.resourcePointerIds,
 			requirementIds: source.dispatch.requirementIds,
+			goalRequirementKeys: source.dispatch.goalRequirementKeys,
 			...(source.dispatch.parentAgentId ? { parentAgentId: source.dispatch.parentAgentId } : {}),
 			...evidence,
 			logicalLaneId: binding.successorAgentId,
@@ -429,7 +472,11 @@ export class DelegationOrchestrationLedger {
 		// New work owns its own correlation; a continuation inherits the prior task's. The
 		// discriminator is explicit so an omitted field means "this work has none", not "reuse the
 		// last one" -- and so a `follow_up` is never silently reclassified as new work.
-		const declaresNewWork = input.goal !== undefined || input.goalId !== undefined || input.taskContext !== undefined;
+		const declaresNewWork =
+			input.goal !== undefined ||
+			input.goalId !== undefined ||
+			input.taskContext !== undefined ||
+			input.objectiveRouteOrigin !== undefined;
 		// A turn that declares no delegation does not continue one: an owner's chat with a leader is session work, so
 		// the prior delegation's correlation is not inherited. A turn of a delegation declares it explicitly.
 		// A continuation of a released objective (its basis carries none) files as session work.
@@ -439,13 +486,12 @@ export class DelegationOrchestrationLedger {
 			(basis.objectiveId === undefined || isLeaderDelegationObjectiveId(basis.objectiveId));
 		const newWork = declaresNewWork || leavesDelegation || delegationObjectiveId !== undefined;
 		const goalId = input.goal?.goalId ?? input.goalId;
-		const objectiveId = delegationObjectiveId
-			? delegationObjectiveId
-			: newWork
-				? goalId
-					? goalObjectiveId(goalId)
-					: `session:${this.sessionId}`
-				: basis.objectiveId!;
+		const objectiveId =
+			delegationObjectiveId ??
+			(goalId ? goalObjectiveId(goalId) : input.objectiveRouteOrigin?.objectiveId) ??
+			(newWork ? `session:${this.sessionId}` : basis.objectiveId!);
+		assertObjectiveRouteOwner(input.objectiveRouteOrigin, this.sessionId, objectiveId);
+		this.assertObjectiveGoalIdentity(objectiveId, input.goal);
 		const requirementIds = newWork
 			? (input.taskContext?.requirementIds ?? [])
 			: (basis.dispatch.requirementIds ?? []);
@@ -490,6 +536,7 @@ export class DelegationOrchestrationLedger {
 					attempt.dispatch.logicalLaneId !== agentId ||
 					attempt.dispatch.instructions !== instructions ||
 					attempt.dispatch.controlForkMode !== input.controlForkMode ||
+					!isDeepStrictEqual(attempt.dispatch.objectiveRouteOrigin, input.objectiveRouteOrigin) ||
 					!isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], evidence.knowledgeReferences ?? []) ||
 					!isDeepStrictEqual(attempt.dispatch.subscriptions ?? [], evidence.subscriptions ?? []) ||
 					(newWork && !isDeepStrictEqual([...(attempt.dispatch.requirementIds ?? [])], [...requirementIds])) ||
@@ -525,8 +572,8 @@ export class DelegationOrchestrationLedger {
 				requiredCapabilities: contract.worker.authority.capabilities,
 				riskBudget: contract.worker.profile.budget,
 				...(declaresNewWork && input.goal ? { goal: input.goal } : {}),
-				...(objectiveId.startsWith("goal:") ? { goalId: objectiveId.slice("goal:".length) } : {}),
-				...(delegationObjectiveId ? { delegationObjectiveId } : {}),
+				resolvedTurnObjectiveId: objectiveId,
+				...(goalId ? { goalId } : {}),
 				taskContext: {
 					requirementIds,
 					dependsOnTaskIds: dependencyTaskIds,
@@ -536,6 +583,9 @@ export class DelegationOrchestrationLedger {
 				executionContract: contract,
 				dispatchMetadata: {
 					...evidence,
+					...(!newWork && basis.dispatch.goalRequirementKeys !== undefined
+						? { goalRequirementKeys: basis.dispatch.goalRequirementKeys }
+						: {}),
 					// The conversation keeps every word an earlier turn read, so a turn after one that carried a third
 					// party's words carries them too.
 					...(evidence.turnOrigin === undefined && priorTurnOrigin ? { turnOrigin: priorTurnOrigin } : {}),
@@ -563,8 +613,9 @@ export class DelegationOrchestrationLedger {
 		parentAgentId?: string;
 		goal?: GoalState;
 		goalId?: string;
-		/** The delegation objective this work is filed under; it takes precedence over the goal-derived objective. */
 		delegationObjectiveId?: string;
+		/** The objective already resolved from a specialist's new-work declaration or continued task. */
+		resolvedTurnObjectiveId?: string;
 		verificationOfTaskId?: string;
 		verificationOfAttemptId?: string;
 		attemptOfTaskId?: string;
@@ -572,6 +623,7 @@ export class DelegationOrchestrationLedger {
 		executionContract?: WorkerExecutionContract;
 		dispatchMetadata?: Pick<
 			OrchestrationDispatchRequest,
+			| "objectiveRouteOrigin"
 			| "receiptOrigin"
 			| "turnOrigin"
 			| "executionKind"
@@ -591,6 +643,7 @@ export class DelegationOrchestrationLedger {
 			| "senderAgentId"
 			| "knowledgeReferences"
 			| "subscriptions"
+			| "goalRequirementKeys"
 		>;
 	}): AttemptRuntimeState {
 		let birthContextForkReference: WorkerContextForkReference | undefined;
@@ -628,8 +681,12 @@ export class DelegationOrchestrationLedger {
 			rungSource?.objectiveId ??
 			existingVerificationSubject?.task.objectiveId ??
 			projectedGoal?.objectiveId ??
+			input.resolvedTurnObjectiveId ??
 			input.delegationObjectiveId ??
-			(input.goalId ? goalObjectiveId(input.goalId) : `session:${this.sessionId}`);
+			(input.goalId ? goalObjectiveId(input.goalId) : input.dispatchMetadata?.objectiveRouteOrigin?.objectiveId) ??
+			`session:${this.sessionId}`;
+		this.assertRoutedObjective(input.dispatchMetadata?.objectiveRouteOrigin, objectiveId, snapshot);
+		this.assertObjectiveGoalIdentity(objectiveId, input.goal);
 		const dependencyTaskIds = rungSource
 			? [...rungSource.dependsOn]
 			: validateTaskDependencyIds(snapshot.tasks, objectiveId, input.taskContext?.dependsOnTaskIds);
@@ -660,9 +717,6 @@ export class DelegationOrchestrationLedger {
 			)
 				throw identityConflict(`Task '${input.laneId}' has conflicting initial event subscriptions.`);
 		}
-		const projectedEvidence =
-			input.goal && objectiveId === projectedGoal?.objectiveId ? projectGoalAcceptanceEvidence(input.goal) : [];
-		if (projectedGoal) this.runtime.assertObjectiveSynchronizationHeadroom(projectedGoal, projectedEvidence);
 		this.runtime.assertProjectionHeadroom({
 			objectives: snapshot.objectives[objectiveId] ? 0 : 1,
 			tasks: taskStateBeforeWrites ? 0 : 1,
@@ -708,13 +762,23 @@ export class DelegationOrchestrationLedger {
 			? snapshot.attempts[snapshot.tasks[input.laneId]?.attemptIds.at(-1) ?? ""]
 			: undefined;
 		const rungAgentId = sourceLastAttempt ? nativeAgentIdForAttempt(sourceLastAttempt) : undefined;
+		const subjectAttemptId = input.verificationOfAttemptId ?? verificationSubject?.attemptIds.at(-1);
+		const subjectAttempt = subjectAttemptId ? snapshot.attempts[subjectAttemptId] : undefined;
+		const requirementIds = input.taskContext?.requirementIds ?? sourceLastAttempt?.dispatch.requirementIds ?? [];
+		const goalRequirementKeys =
+			sourceLastAttempt || subjectAttempt
+				? (sourceLastAttempt ?? subjectAttempt)?.dispatch.goalRequirementKeys
+				: input.goal && projectedGoal?.objectiveId === objectiveId && requirementIds.length > 0
+					? input.goal.requirements.filter((item) => requirementIds.includes(item.id)).map(requirementKey)
+					: undefined;
 		const dispatch = {
 			taskId: input.laneId,
 			profileId: input.profileId,
 			instructions: input.instructions,
 			resourcePointerIds: input.taskContext?.resourcePointerIds ?? [],
 			...(input.parentAgentId ? { parentAgentId: input.parentAgentId } : {}),
-			requirementIds: input.taskContext?.requirementIds ?? [],
+			requirementIds,
+			...(goalRequirementKeys !== undefined ? { goalRequirementKeys } : {}),
 			...(input.executionContract ? { executionContract: input.executionContract } : {}),
 			...input.dispatchMetadata,
 			...(rungAgentId !== undefined ? { logicalLaneId: rungAgentId } : {}),
@@ -781,29 +845,48 @@ export class DelegationOrchestrationLedger {
 	}
 
 	synchronizeGoalState(goal: GoalState): void {
-		const objective = projectGoalObjective(goal);
-		const evidence = projectGoalAcceptanceEvidence(goal);
-		this.runtime.assertObjectiveSynchronizationHeadroom(objective, evidence);
-		this.runtime.ensureObjective(objective);
-		for (const item of evidence) {
-			this.runtime.recordObjectiveEvidence(objective.objectiveId, item);
-		}
-		const status = this.runtime.getSnapshot().objectives[goalObjectiveId(goal.goalId)]?.objective.status;
-		if (isGoalExecutionActive(goal.status)) {
-			if (status === "paused") this.runtime.resumeObjective(objective.objectiveId);
-		} else if (isGoalStoppedStatus(goal.status)) {
-			if (status === "active") this.runtime.pauseObjective(objective.objectiveId, "kernel");
-		} else if (goal.status === "cancelled") {
-			// A settled objective (completed or cancelled) is terminal: the goal's move toward the other terminal status
-			// has nothing left to apply, so it is skipped rather than thrown.
-			if (status !== "cancelled" && status !== "completed") this.runtime.cancelObjective(objective.objectiveId);
-		} else if (goal.status === "completed") {
-			// A completion the trusted evidence does not support is not applied here: the goal layer reopens the goal
-			// as active on the same predicate, and the objective stays open until the evidence exists.
-			if (status !== "completed" && status !== "cancelled" && getGoalCompletionRefusal(goal) === undefined) {
-				this.runtime.completeObjectiveFromOwner(objective.objectiveId, hasGoalAcceptanceOverride(goal));
-			}
-		}
+		this.assertGoalIdentity?.(goal);
+		const projected = projectGoalObjective(goal);
+		const current = this.runtime.getSnapshot().objectives[projected.objectiveId];
+		const objective = { ...projected, constraints: current?.objective.constraints ?? projected.constraints };
+		const evidence = projectGoalAcceptanceEvidence(goal, current?.evidence);
+
+		const status = isGoalExecutionActive(goal.status)
+			? "active"
+			: isGoalStoppedStatus(goal.status)
+				? "paused"
+				: goal.status === "cancelled"
+					? "cancelled"
+					: goal.status === "completed" && getGoalCompletionRefusal(goal) === undefined
+						? "completed"
+						: undefined;
+		const position = this.goalSourcePosition?.(goal);
+		if (goal.ownerCorrection && !position)
+			throw new DurableTaskRuntimeError("Owner correction requires its certified durable goal journal.");
+		const source: GoalObjectiveSource = {
+			...(position
+				? {
+						position,
+						cursor: {
+							createdAt: goal.createdAt,
+							revision: goal.revision ?? 0,
+							definitionKey: createHash("sha256")
+								.update(JSON.stringify([goal.userGoal, goal.requirements.map(requirementKey)]))
+								.digest("hex"),
+							goalEntryId: position.goalEntryId,
+							...(goal.ownerCorrection ? { lastCorrection: goal.ownerCorrection } : {}),
+							...(goal.ownerCorrectionProof && hasCurrentCorrectedOutcomeProof(goal)
+								? { correctedOutcomeProof: goal.ownerCorrectionProof }
+								: {}),
+						},
+					}
+				: {}),
+			goalId: goal.goalId,
+			createdAt: goal.createdAt,
+			status,
+			completionPolicy: hasGoalAcceptanceOverride(goal) ? ("owner_override" as const) : ("owner_evidence" as const),
+		};
+		this.runtime.synchronizeGoalObjective(objective, evidence, source);
 	}
 
 	start(

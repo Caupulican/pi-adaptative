@@ -9,8 +9,11 @@ import {
 	type FleetScheduler,
 	laneSubtreeId,
 } from "../fleet/fleet-types.ts";
+import { currentRequirementCheckEvidence, requirementKey } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { HostRequirementChecks } from "../goals/session-requirement-check.ts";
+import { currentWorkerRequirementAttempt } from "../goals/worker-requirement-evidence.ts";
+import { sameGoalExecution } from "../objective-execution/current-objective-execution.ts";
 import { nativeAgentIdForAttempt } from "../orchestration/attempt-agent-identity.ts";
 import {
 	ORCHESTRATION_THINKING_LEVELS,
@@ -271,23 +274,66 @@ export class WorkerEscalation {
 		const attemptId = outcome.attempts.at(-1)?.attemptId;
 		if (!attemptId || this.checkedAttempts.has(attemptId) || this.transferOwnsSource(attemptId)) return;
 		this.checkedAttempts.add(attemptId);
-		const requirements = new Map((this.deps.goalState()?.requirements ?? []).map((entry) => [entry.id, entry]));
+		const goal = this.deps.goalState();
+		if (!goal) return;
+		const requirements = new Map(goal.requirements.map((entry) => [entry.id, entry]));
 		const cwd = this.checkCwd(attemptId);
 		const checks: HostRequirementCheck[] = [];
 		for (const id of requirementIds) {
-			const check = requirements.get(id)?.check;
-			if (!check) continue;
-			const result = await this.deps.requirementChecks.run(check, cwd, this.deps.signal);
+			const requirement = requirements.get(id);
+			if (!requirement?.check) continue;
+			const isCurrentAttempt = () => {
+				const latestGoal = this.deps.goalState();
+				return (
+					sameGoalExecution(goal, latestGoal) &&
+					latestGoal !== undefined &&
+					currentWorkerRequirementAttempt(this.deps.runtime.getSnapshot(), latestGoal, id, attemptId)
+				);
+			};
+			if (!isCurrentAttempt()) continue;
+			const beforeRun = this.deps.goalState()!;
+			const expectedLatestCheckEvidenceId = currentRequirementCheckEvidence(beforeRun, requirement)?.id;
+			const result = await this.deps.requirementChecks.run(requirement.check, cwd, this.deps.signal);
 			if (this.deps.signal.aborted || this.transferOwnsSource(attemptId)) return;
-			checks.push({ id, passed: result.passed });
-			if (result.passed) this.deps.requirementChecks.recordProof?.(attemptId, id, result);
+			const current = this.deps.goalState();
+			const currentRequirement = current?.requirements.find((item) => item.id === id);
+			const definition = requirementKey(requirement);
+			if (
+				current?.goalId !== goal.goalId ||
+				!currentRequirement ||
+				!isCurrentAttempt() ||
+				currentRequirementCheckEvidence(current, currentRequirement)?.id !== expectedLatestCheckEvidenceId ||
+				requirementKey(currentRequirement) !== definition
+			)
+				continue;
+			const recorded = await this.deps.requirementChecks.recordProof?.(
+				attemptId,
+				goal.goalId,
+				id,
+				definition,
+				result,
+				{ expectedLatestCheckEvidenceId, isCurrentAttempt },
+			);
+			if (recorded !== false && isCurrentAttempt()) checks.push({ id, passed: result.passed });
 		}
 		harnessLog.info("escalation", "host requirement checks ran after a worker attempt", {
 			outcomeId: outcome.outcomeId,
 			passed: checks.filter((check) => check.passed).length,
 			failed: checks.filter((check) => !check.passed).length,
 		});
-		if (checks.length > 0) this.deps.recordChecks(attemptId, checks);
+		const latest = this.deps.goalState();
+		const currentChecks =
+			latest?.goalId === goal.goalId
+				? checks.filter((check) => {
+						const requirement = latest.requirements.find((item) => item.id === check.id);
+						const measurement = requirement && currentRequirementCheckEvidence(latest, requirement);
+						return (
+							currentWorkerRequirementAttempt(this.deps.runtime.getSnapshot(), latest, check.id, attemptId) &&
+							(!this.deps.requirementChecks.recordProof || measurement?.sourceAttemptId === attemptId)
+						);
+					})
+				: [];
+		if (currentChecks.length > 0) this.deps.recordChecks(attemptId, currentChecks);
 	}
 
 	private transferOwnsSource(attemptId: string): boolean {

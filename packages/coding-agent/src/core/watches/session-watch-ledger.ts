@@ -159,14 +159,18 @@ export interface SessionWatchRecord {
 export interface SessionWatchRequirement {
 	readonly goalId: string;
 	readonly requirementId: string;
+	readonly definitionKey?: string;
 }
 
 function parseRequirement(value: unknown): SessionWatchRequirement {
-	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["goalId", "requirementId"]))
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["goalId", "requirementId", "definitionKey"]))
 		throw new TypeError("Watch requirement is invalid.");
 	return {
 		goalId: boundedRoutineText(value.goalId, MAX_ID_CHARS, "goal"),
 		requirementId: boundedRoutineText(value.requirementId, MAX_ID_CHARS, "requirement"),
+		...(value.definitionKey === undefined
+			? {}
+			: { definitionKey: boundedRoutineText(value.definitionKey, MAX_ID_CHARS, "definition") }),
 	};
 }
 

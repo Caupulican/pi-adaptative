@@ -135,8 +135,12 @@ export interface ToolCallHandoff {
 	inForeground<T>(completion: T): T;
 }
 
-export function toolCallHandoff(form: ToolCallForm, config: AgentLoopConfig): ToolCallHandoff {
-	const background = form.background;
+export function toolCallHandoff(
+	form: ToolCallForm,
+	config: AgentLoopConfig,
+	foregroundBarrier = false,
+): ToolCallHandoff {
+	const background = foregroundBarrier ? undefined : form.background;
 	const delayMs = background !== undefined ? undefined : backgroundToolCallDelay(config);
 	let start: (args: Record<string, any>) => void = () => {};
 	const decided = new Promise<Record<string, any>>((resolve) => {
@@ -145,6 +149,7 @@ export function toolCallHandoff(form: ToolCallForm, config: AgentLoopConfig): To
 	if (background === undefined) start(form.arguments);
 	return {
 		canHandOff:
+			!foregroundBarrier &&
 			canHandOffToolCalls(config) &&
 			(background !== undefined || delayMs !== undefined || config.subscribeToolCallHandoffRequest !== undefined),
 		handoffArguments: background?.arguments ?? form.arguments,

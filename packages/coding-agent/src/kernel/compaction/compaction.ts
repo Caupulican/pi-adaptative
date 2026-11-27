@@ -25,8 +25,13 @@ import {
 } from "../messages.ts";
 import { PrefixFold } from "../prefix-fold.ts";
 import { ESTIMATED_IMAGE_CHARS, estimateProviderRequestTokens } from "../provider-request-estimator.ts";
+import { parentCompactionInputs } from "../session/parent-input-ledger.ts";
+import {
+	isWholePathCompaction,
+	sessionContextItems,
+	summarizedGapEntryIds,
+} from "../session/session-context-builder.ts";
 import type { CompactionEntry, CompactionRetention, SessionEntry } from "../session/session-entries.ts";
-import { buildSessionContext, isWholePathCompaction, summarizedGapEntryIds } from "../session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../types.ts";
 import { addUsage, combineUsage, createEmptyUsage } from "../usage.ts";
 import { captureUsageComponent, type UsageComponent } from "../usage-components.ts";
@@ -1338,10 +1343,6 @@ export function estimateStringTokens(text: string): number {
 	return Math.ceil(text.length / 4);
 }
 
-// ============================================================================
-// Compaction Preparation (for extensions)
-// ============================================================================
-
 export interface CompactionPreparation {
 	ownerHistory?: readonly CompactionOwnerInput[];
 	/** UUID of first entry to keep */
@@ -1378,6 +1379,8 @@ export interface CompactionPreparation {
 }
 
 export interface PrepareCompactionOptions {
+	/** Scope slicing and lifecycle filtering cannot reconstruct the canonical parent-input ledger. */
+	parentInputs?: ReturnType<typeof parentCompactionInputs>;
 	projectOwnerHistory?: CompactionOwnerHistoryPort;
 	allowTrailingCompactionAsPrevious?: boolean;
 	/**
@@ -1405,6 +1408,10 @@ export function prepareCompaction(
 	settings: CompactionSettings,
 	options?: PrepareCompactionOptions,
 ): CompactionPreparation | undefined {
+	const inputs = options?.parentInputs ?? parentCompactionInputs(pathEntries);
+	if (inputs.hasHiddenInputs) pathEntries = pathEntries.map(inputs.project);
+	const messagesOf = (path: SessionEntry[]) =>
+		sessionContextItems(path, inputs.preservedIds).map(({ message }) => message);
 	// A checkpoint scoped to a later entry of this path (a running ICM chat turn's start) summarized only its scope, so
 	// it is neither the previous checkpoint nor a reason to stop: the raw entries it covered are still on the path and
 	// are summarized from the last whole-path checkpoint, which keeps the new checkpoint lossless.
@@ -1443,7 +1450,7 @@ export function prepareCompaction(
 			? pathEntries.length - 1
 			: pathEntries.length;
 
-	const wireMessages = buildSessionContext(pathEntries).messages;
+	const wireMessages = messagesOf(pathEntries);
 	const tokensBefore = estimateContextTokens(wireMessages).tokens;
 	const liveMessages = stripCompactionOwnerMessages(wireMessages, previousDetails);
 
@@ -1522,7 +1529,7 @@ export function prepareCompaction(
 		const settledLiveMessages =
 			settledPathEntries === pathEntries
 				? liveMessages
-				: stripCompactionOwnerMessages(buildSessionContext(settledPathEntries).messages, previousDetails);
+				: stripCompactionOwnerMessages(messagesOf(settledPathEntries), previousDetails);
 
 		const fileOps = extractFileOperations(settledLiveMessages, settledPathEntries, prevCompactionIndex);
 		const factStart = prevCompactionIndex >= 0 ? prevCompactionIndex + 1 : 0;
@@ -1552,7 +1559,7 @@ export function prepareCompaction(
 				? { mode: "original-user", userEntryId: originalUserEntry.id }
 				: { mode: "original-user" },
 			...(coveredThroughEntryId ? { coveredThroughEntryId } : {}),
-			summarizedGapEntryIds: summarizedGapEntryIds(settledPathEntries),
+			summarizedGapEntryIds: summarizedGapEntryIds(settledPathEntries, undefined, inputs.preservedIds),
 			fileOps,
 			facts,
 			ownerHistory: boundCompactionOwnerHistory(
@@ -1570,7 +1577,6 @@ export function prepareCompaction(
 
 	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
 
-	// Get UUID of first kept entry
 	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];
 	if (!firstKeptEntry?.id) {
 		return undefined; // Session needs migration
@@ -1579,14 +1585,12 @@ export function prepareCompaction(
 
 	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
 
-	// Messages to summarize (will be discarded after summary)
 	const rawMessagesToSummarize: AgentMessage[] = [];
 	for (let i = boundaryStart; i < historyEnd; i++) {
 		const msg = getMessageFromEntryForCompaction(pathEntries[i]);
 		if (msg) rawMessagesToSummarize.push(msg);
 	}
 
-	// Messages for turn prefix summary (if splitting a turn)
 	const rawTurnPrefixMessages: AgentMessage[] = [];
 	if (cutPoint.isSplitTurn) {
 		for (let i = cutPoint.turnStartIndex; i < cutPoint.firstKeptEntryIndex; i++) {
@@ -1644,10 +1648,6 @@ export function prepareCompaction(
 		summarizerInputTokens,
 	};
 }
-
-// ============================================================================
-// Main compaction function
-// ============================================================================
 
 interface VerifiedSummaryResult {
 	summary: string;

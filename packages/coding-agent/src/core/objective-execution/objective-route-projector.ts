@@ -3,9 +3,12 @@
  * Builds bounded, redacted projection for Jev semantic routing questions.
  */
 
+import { objectiveNeedsCorrectedOutcome, provenObjectiveCriterionIds } from "../orchestration/objective-criteria.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import type { ObjectiveWorkClass } from "../steering/programs.ts";
 import type { ExecutionState } from "../system-one/types.ts";
+import { OBJECTIVE_WAIT_ROUTES } from "./objective-route.ts";
+import { evidenceMarkerOf } from "./objective-stall-fingerprint.ts";
 
 /**
  * Every work class the route policy composes: the route checkpoint's own options, plus the classes
@@ -48,6 +51,14 @@ export interface ObjectiveRouteProjection {
 	readonly repeatedStrategy: boolean;
 }
 
+function objectiveWork(runtime: TaskRuntimeProjection, objectiveId: string) {
+	const tasks = Object.values(runtime.tasks).filter((item) => item.task.objectiveId === objectiveId);
+	const attempts = Object.values(runtime.attempts).filter(
+		(item) => runtime.tasks[item.taskId]?.task.objectiveId === objectiveId,
+	);
+	return { tasks, attempts };
+}
+
 /**
  * Builds a bounded, redacted projection summarizing runtime state without leaking raw prose or secrets.
  */
@@ -61,9 +72,11 @@ export function projectObjectiveForRouting(
 	},
 ): ObjectiveRouteProjection {
 	const activeObjectiveId = Object.keys(runtime.objectives)[0] ?? "unknown_objective";
-	const tasks = Object.values(runtime.tasks);
-	const openTasks = tasks.filter((t) => t.task.status === "pending" || t.task.status === "running").length;
-	const activeAttempts = Object.values(runtime.attempts).filter((a) => a.status === "running");
+	const { tasks, attempts } = objectiveWork(runtime, activeObjectiveId);
+	const openTasks = tasks.filter(
+		(t) => t.task.status === "pending" || t.task.status === "ready" || t.task.status === "running",
+	).length;
+	const activeAttempts = attempts.filter((a) => a.status === "running");
 
 	const verifications = systemOneState.verification ?? [];
 	const unresolvedObligations = verifications.filter(
@@ -97,9 +110,11 @@ export interface BoundedCombinedStateProjection {
 		readonly id: string;
 		readonly goal: string;
 		readonly required_criteria: readonly string[];
+		readonly corrected_outcome_pending?: boolean;
 	};
 	readonly runtime: {
 		readonly ready_tasks: readonly string[];
+		readonly incomplete_task_count: number;
 		readonly running_attempts: readonly string[];
 		readonly failed_retryable_tasks: readonly string[];
 	};
@@ -133,20 +148,25 @@ export interface RouteHistoryEntry {
 	readonly route: string;
 	readonly reasonCodes: readonly string[];
 	readonly evidenceMarker: number;
+	readonly workKey?: string;
 	readonly executor?: string;
 }
 
 /** Consecutive identical routes at the tail of the history, on unchanged evidence. */
-export function repeatedRouteCount(history: readonly RouteHistoryEntry[]): number {
-	const last = history.at(-1);
-	if (!last) return 0;
+export function repeatedRouteCount(history: readonly RouteHistoryEntry[], currentEvidenceMarker: number): number {
+	const last = history.findLast((entry) => !OBJECTIVE_WAIT_ROUTES.includes(entry.route));
+	if (!last || last.evidenceMarker !== currentEvidenceMarker) return 0;
 	let count = 0;
 	for (let index = history.length - 1; index >= 0; index--) {
 		const entry = history[index]!;
+		if (OBJECTIVE_WAIT_ROUTES.includes(entry.route)) continue;
 		if (
-			entry.route !== last.route ||
 			entry.evidenceMarker !== last.evidenceMarker ||
-			entry.reasonCodes.join(",") !== last.reasonCodes.join(",")
+			(last.workKey !== undefined
+				? entry.workKey !== last.workKey
+				: entry.route !== last.route ||
+					entry.workKey !== undefined ||
+					entry.reasonCodes.join(",") !== last.reasonCodes.join(","))
 		)
 			break;
 		count++;
@@ -172,18 +192,16 @@ export function projectBoundedCombinedState(
 	},
 ): BoundedCombinedStateProjection {
 	const obj = runtime.objectives[objectiveId];
-	const tasks = Object.values(runtime.tasks);
-	const attempts = Object.values(runtime.attempts);
-
-	const readyTasks = tasks
-		.filter((t) => t.task.status === "pending")
-		.map((t) => (t.task as { taskId?: string; id?: string }).taskId ?? (t.task as { id?: string }).id ?? "");
+	const { tasks, attempts } = objectiveWork(runtime, objectiveId);
+	const readyTasks = tasks.filter((item) => item.task.status === "ready").map((item) => item.task.taskId);
 	const runningAttempts = attempts
-		.filter((a) => a.status === "running")
-		.map((a) => (a as { attemptId?: string; id?: string }).attemptId ?? (a as { id?: string }).id ?? "");
-	const failedRetryableTasks = tasks
-		.filter((t) => t.task.status === "failed" && (t.task as { retryable?: boolean }).retryable !== false)
-		.map((t) => (t.task as { taskId?: string; id?: string }).taskId ?? (t.task as { id?: string }).id ?? "");
+		.filter((attempt) => attempt.status === "running")
+		.map((attempt) => attempt.attemptId);
+	const failedRetryableTasks = [
+		...new Set(
+			attempts.filter((attempt) => attempt.status === "suspended" && attempt.retry).map((attempt) => attempt.taskId),
+		),
+	];
 
 	const sys = options?.systemOneState;
 	const integrityAvailable = options?.integrityState === "available" || sys !== undefined;
@@ -191,10 +209,7 @@ export function projectBoundedCombinedState(
 	const hypotheses = sys?.hypotheses ?? [];
 	const changes = sys?.changes ?? [];
 
-	const freshEvidence = (obj?.evidence ?? []).map((e) => {
-		const eAny = e as { criterionId?: string; requirement_id?: string; id?: string; evidenceId?: string };
-		return eAny.criterionId ?? eAny.requirement_id ?? eAny.id ?? eAny.evidenceId ?? "evidence";
-	});
+	const freshEvidence = obj ? [...provenObjectiveCriterionIds(obj)] : [];
 	const openHypotheses = hypotheses
 		.filter((h) => h.status === "candidate" || h.status === "investigating")
 		.map((h) => h.id);
@@ -203,20 +218,22 @@ export function projectBoundedCombinedState(
 		.map((v) => (v as { gate_id?: string; id: string }).gate_id ?? v.id);
 	const recentChanges = changes.map((c) => c.path);
 
-	const rawCriteria =
-		obj?.objective.acceptanceCriteria ??
-		(obj?.objective as { acceptance_criteria?: readonly (string | { id: string })[] })?.acceptance_criteria ??
-		[];
-	const requiredCriteria = rawCriteria.map((c) => (typeof c === "string" ? c : c.id));
+	const requiredCriteria = (obj?.objective.acceptanceCriteria ?? [])
+		.filter((criterion) => criterion.required)
+		.map((criterion) => criterion.id);
 
 	return {
 		objective: {
 			id: objectiveId,
-			goal: obj?.objective.description ?? (obj?.objective as { goal?: string } | undefined)?.goal ?? "",
+			goal: obj?.objective.description ?? "",
 			required_criteria: requiredCriteria,
+			...(objectiveNeedsCorrectedOutcome(obj) ? { corrected_outcome_pending: true } : {}),
 		},
 		runtime: {
 			ready_tasks: readyTasks,
+			incomplete_task_count: tasks.filter(
+				(item) => item.task.status !== "completed" && item.task.status !== "cancelled",
+			).length,
 			running_attempts: runningAttempts,
 			failed_retryable_tasks: failedRetryableTasks,
 		},
@@ -240,7 +257,9 @@ export function projectBoundedCombinedState(
 				reason_codes: entry.reasonCodes,
 				...(entry.executor ? { executor: entry.executor } : {}),
 			})),
-			repeated_route_count: repeatedRouteCount(options?.history ?? []),
+			repeated_route_count: options?.history?.length
+				? repeatedRouteCount(options.history, evidenceMarkerOf(runtime, objectiveId))
+				: 0,
 		},
 	};
 }

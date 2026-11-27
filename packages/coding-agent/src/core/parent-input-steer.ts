@@ -47,11 +47,17 @@ export interface SteeredMessage {
 	abandon(): void;
 }
 
+export type SteeredInputAdmission = (message: CustomMessage<unknown>, signal?: AbortSignal) => Promise<boolean>;
+
 export interface ParentInputSteerDeps {
 	foreground: Pick<ForegroundRecoveryController, "isForegroundOccupied">;
 	getSessionManager(): SessionManager;
 	/** Queues the message for the running turn's next model step. */
-	steer(message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">): SteeredMessage;
+	steer(
+		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">,
+		admit: SteeredInputAdmission,
+	): SteeredMessage;
+	commitRoutedMessages?(): void;
 	/** The durable turn path: what an input does when no turn is running to take it. */
 	deliverDurable(input: ParentInputDelivery, options?: ParentInputDeliveryOptions): Promise<ParentInputReceipt>;
 	/** Throws when the input's session or branch is no longer the one it was produced for. */
@@ -103,6 +109,7 @@ export class ParentInputSteerController {
 
 	/** Called immediately before the running turn polls its steering queue: every waiting input joins it. */
 	flush(): void {
+		if (this.deps.getSessionManager().getActiveParentInputWake()) return;
 		for (const waiting of [...this.waiting]) {
 			this.waiting.delete(waiting);
 			try {
@@ -169,15 +176,57 @@ export class ParentInputSteerController {
 		}
 		const details = isPlainRecord(input.message.details) ? input.message.details : { value: input.message.details };
 		const mark: SteeredDeliveryMark = { deliveryId: input.deliveryId, payloadDigest: input.payloadDigest };
-		const steered = this.deps.steer({ ...input.message, details: { ...details, [STEERED_DELIVERY_KEY]: mark } });
+		let receipt: ParentInputReceipt | undefined;
+		const steered = this.deps.steer(
+			{ ...input.message, details: { ...details, [STEERED_DELIVERY_KEY]: mark } },
+			(message, signal) =>
+				manager.queueMutation(() => {
+					const assertCurrent = () => {
+						signal?.throwIfAborted();
+						waiting.options?.signal?.throwIfAborted();
+						waiting.options?.runtimeLease?.assertCurrent();
+						waiting.assertBranch();
+						if (this.closed || this.deps.getSessionManager() !== manager)
+							throw new Error("Parent input session changed.");
+						this.deps.assertAcceptable(manager, input);
+					};
+					assertCurrent();
+					waiting.options?.beforeOwnership?.();
+					assertCurrent();
+					const admitted = manager.appendSteeredParentInput(
+						message,
+						input.origin,
+						() => {
+							receipt = this.replay(manager, input);
+							const ledger = manager.getParentInput(input.deliveryId);
+							if (!receipt && ledger) {
+								if (ledger.metadata.payloadDigest !== input.payloadDigest)
+									throw new Error("Parent input delivery ID conflicts with its saved payload.");
+								receipt = { entryId: ledger.entryId, sessionId: manager.getSessionId() };
+							}
+							return receipt !== undefined;
+						},
+						waiting.options?.withAppend,
+						() => {
+							assertCurrent();
+							this.deps.commitRoutedMessages?.();
+						},
+					);
+					return admitted;
+				}),
+		);
 		const queued: QueuedSteer = { waiting, steered };
 		this.queued.add(queued);
 		steered.accepted.then(
 			() => {
 				this.queued.delete(queued);
-				const saved = this.replay(manager, input);
-				if (saved) waiting.resolve(saved);
-				else waiting.reject(new Error("The steered parent input has no canonical entry."));
+				try {
+					const saved = receipt ?? this.replay(manager, input);
+					if (!saved) throw new Error("The steered parent input has no canonical entry.");
+					waiting.resolve(saved);
+				} catch (error) {
+					waiting.reject(error);
+				}
 			},
 			(error: unknown) => {
 				this.queued.delete(queued);

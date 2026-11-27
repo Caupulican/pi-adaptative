@@ -19,7 +19,7 @@ import {
 	PARENT_NOTE_REQUEST_CUSTOM_TYPE,
 } from "../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
-import { QUEUED_INPUT_CUSTOM_TYPE } from "../kernel/session/session-entries.ts";
+import { GOAL_OWNER_CORRECTION_CUSTOM_TYPE, QUEUED_INPUT_CUSTOM_TYPE } from "../kernel/session/session-entries.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { visitSessionAncestry } from "../kernel/session/session-tree.ts";
 import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "../kernel/session/worker-project-enrollment.ts";
@@ -449,6 +449,7 @@ function hostReservedCustomTypes(): ReadonlySet<string> {
 		PARENT_INPUT_SKIPPED_CUSTOM_TYPE,
 		PARENT_NOTE_REQUEST_CUSTOM_TYPE,
 		GOAL_STATE_CUSTOM_TYPE,
+		GOAL_OWNER_CORRECTION_CUSTOM_TYPE,
 		WORKER_RECEIPTS_CUSTOM_TYPE,
 		WORKER_RECEIPT_ORIGIN_CUSTOM_TYPE,
 		WORKER_CHANGED_FILE_CUSTOM_TYPE,

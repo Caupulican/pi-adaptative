@@ -67,6 +67,8 @@ export interface ExecutionStoreOptions {
 
 /** Canonical goal/runtime/verification folded into the System One store. Not a second authority. */
 export interface CanonicalHydration {
+	/** Journal entry of an owner correction admitted by the current durable objective. */
+	ownerCorrectionEntryId?: string;
 	request: string;
 	normalized_goal: string;
 	acceptance_criteria: AcceptanceCriterion[];
@@ -234,8 +236,24 @@ export function validateWorkerTurnResult(raw: unknown): WorkerTurnResult {
 	return raw as WorkerTurnResult;
 }
 
+function freshCompletion(): CompletionState {
+	return {
+		requested: false,
+		requested_at: null,
+		attempt: 0,
+		gates: [],
+		final_summary_ref: null,
+		terminal_status: "none",
+	};
+}
+
 export class ExecutionStore {
 	private state: ExecutionState;
+	private lastOwnerCorrectionEntryId?: string;
+
+	hasOwnerCorrection(entryId: string): boolean {
+		return this.lastOwnerCorrectionEntryId === entryId;
+	}
 	private readonly usesDefaultAllowedPaths: boolean;
 	private observationCounter = 0;
 	private claimCounter = 0;
@@ -296,15 +314,6 @@ export class ExecutionStore {
 			steps: options.initial_plan ?? [],
 		};
 
-		const initialCompletion: CompletionState = {
-			requested: false,
-			requested_at: null,
-			attempt: 0,
-			gates: [],
-			final_summary_ref: null,
-			terminal_status: "none",
-		};
-
 		this.state = {
 			run_id: options.run_id,
 			schema_version: "1.0",
@@ -322,7 +331,7 @@ export class ExecutionStore {
 			verification: [],
 			decisions: [],
 			risks: [],
-			completion: initialCompletion,
+			completion: freshCompletion(),
 		};
 	}
 
@@ -403,7 +412,14 @@ export class ExecutionStore {
 	 * Replace objective, plan, observations, and verification from canonical session truth.
 	 * Tool events, decisions, claims, and completion records stay with this store.
 	 */
-	hydrateFromCanonical(input: CanonicalHydration): void {
+	hydrateFromCanonical(input: CanonicalHydration): boolean {
+		const correction = input.ownerCorrectionEntryId;
+		const corrected = correction !== undefined && correction !== this.lastOwnerCorrectionEntryId;
+		if (corrected) {
+			this.lastOwnerCorrectionEntryId = correction;
+			this.state.completion = freshCompletion();
+			this.state.phase = "executing";
+		}
 		this.state.objective = {
 			request: input.request,
 			normalized_goal: input.normalized_goal,
@@ -425,6 +441,7 @@ export class ExecutionStore {
 		}
 		this.state.repo.current_revision = input.current_revision;
 		this.state.updated_at = new Date().toISOString();
+		return corrected;
 	}
 
 	getRepo(): Readonly<RepoState> {

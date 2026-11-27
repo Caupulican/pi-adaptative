@@ -724,23 +724,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		// Bounded ids only: what rides the durable mailbox must survive a restart without carrying a
 		// copy of the goal state, whose own durable objective is admitted below before the message is.
 		const newTask = normalizeWorkerAgentNewTaskCorrelation(
-			options.newTask === undefined
-				? undefined
-				: {
-						...(options.newTask.goal ? { goalId: options.newTask.goal.goalId } : {}),
-						...(options.newTask.knowledgeReferences
-							? { knowledgeReferences: options.newTask.knowledgeReferences }
-							: {}),
-						...(options.newTask.subscriptions ? { subscriptions: options.newTask.subscriptions } : {}),
-						...(options.newTask.controlForkMode ? { controlForkMode: options.newTask.controlForkMode } : {}),
-						...(options.newTask.requirementIds ? { requirementIds: options.newTask.requirementIds } : {}),
-						...(options.newTask.acceptanceCriterionIds
-							? { acceptanceCriterionIds: options.newTask.acceptanceCriterionIds }
-							: {}),
-						...(options.newTask.resourcePointerIds
-							? { resourcePointerIds: options.newTask.resourcePointerIds }
-							: {}),
-					},
+			options.newTask && { ...options.newTask, goalId: options.newTask.goal?.goalId },
 		);
 		if (options.idempotencyKey !== undefined) {
 			const messageId = workerAgentMessageId(this.options.parentSessionId, options.idempotencyKey);
@@ -953,7 +937,17 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				// needs on recovery, so they are still written BEFORE the message. The mailbox calls this
 				// only once it has ruled out every deterministic refusal (bounds, replay identity, pending
 				// capacity, encoded-byte admission), so a refused start no longer leaves a new objective.
-				newTaskGoal ? () => this.options.getLifecycle().synchronizeGoalState(newTaskGoal) : undefined,
+				newTaskGoal || newTask?.objectiveRouteOrigin
+					? () => {
+							const lifecycle = this.options.getLifecycle();
+							if (newTask?.objectiveRouteOrigin)
+								lifecycle.ledger.assertRoutedObjective(
+									newTask.objectiveRouteOrigin,
+									newTask.goalId ? `goal:${newTask.goalId}` : newTask.objectiveRouteOrigin.objectiveId,
+								);
+							if (newTaskGoal) lifecycle.synchronizeGoalState(newTaskGoal);
+						}
+					: undefined,
 				receiptOrigin,
 			);
 			if (queued.status === "completed_replay") {
@@ -1020,12 +1014,15 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		attempt: AttemptRuntimeState,
 		newTask: WorkerAgentNewTaskCorrelation | undefined,
 	): boolean {
-		if (!newTask) return true;
+		if (!newTask) return attempt.dispatch.objectiveRouteOrigin === undefined;
 		const task = this.options.getLifecycle().getTask(attempt.taskId)?.task;
 		if (!task) return false;
-		const objectiveId = newTask.goalId ? `goal:${newTask.goalId}` : `session:${this.options.parentSessionId}`;
+		const objectiveId = newTask.goalId
+			? `goal:${newTask.goalId}`
+			: (newTask.objectiveRouteOrigin?.objectiveId ?? `session:${this.options.parentSessionId}`);
 		return (
 			task.objectiveId === objectiveId &&
+			isDeepStrictEqual(attempt.dispatch.objectiveRouteOrigin, newTask.objectiveRouteOrigin) &&
 			attempt.dispatch.controlForkMode === newTask.controlForkMode &&
 			isDeepStrictEqual([...(attempt.dispatch.requirementIds ?? [])], [...(newTask.requirementIds ?? [])]) &&
 			isDeepStrictEqual([...task.acceptanceCriterionIds], [...(newTask.acceptanceCriterionIds ?? [])]) &&

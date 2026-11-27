@@ -30,6 +30,7 @@ import type { WaitEndReport } from "../../../../src/core/util/wait.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
 import { calls, createBarrier, fail, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
+import { scriptRequirementCheckSpawn } from "./journey-9-shared.ts";
 
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
@@ -66,6 +67,11 @@ import {
 } from "./shared.ts";
 
 export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promise<void> {
+	const VITEST_COMMAND = "vitest run test/limits.test.ts";
+	const nativeCriterion = `Run ${JSON.stringify(VITEST_COMMAND)} and require exit code 0.`;
+	const goalRequest = world.systemOne.enabled
+		? "Goal: set MAX_RETRIES to 5 in the limits file. Dispatch agents to confirm it and report back."
+		: nativeCriterion;
 	const trace = world.trace;
 	const allReported = createBarrier();
 	const workersMayRead = createBarrier();
@@ -86,11 +92,22 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			{
 				id: "goal-1",
 				name: "goal",
-				arguments: { action: "start", goalId: "limits-goal", userGoal: "Set MAX_RETRIES to 5." },
+				arguments: {
+					action: "start",
+					goalId: "limits-goal",
+					userGoal: world.systemOne.enabled ? "Set MAX_RETRIES to 5." : nativeCriterion,
+				},
 			},
 		]),
 		calls("goal-requirement", [
-			{ id: "goal-2", name: "goal", arguments: { action: "add_requirement", text: "MAX_RETRIES equals 5" } },
+			{
+				id: "goal-2",
+				name: "goal",
+				arguments: {
+					action: "add_requirement",
+					text: world.systemOne.enabled ? "MAX_RETRIES equals 5" : nativeCriterion,
+				},
+			},
 		]),
 		calls("dispatch-three", [
 			{
@@ -348,6 +365,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	world.systemOne.enterPhase(
 		"orchestration-goal",
 		{
+			scope_requested: { kind: "noul", probability: 0.97 },
 			capabilities_authorized: { kind: "noul", probability: 0.02 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
@@ -362,9 +380,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			next_status: { kind: "choice", choice: "continue", confidence: 0.97 },
 		},
 		{
-			expect: ownerWords(
-				"Goal: set MAX_RETRIES to 5 in the limits file. Dispatch agents to confirm it and report back.",
-			),
+			expect: ownerWords(goalRequest),
 		},
 	);
 	trace.mark("root", "owner.task");
@@ -395,11 +411,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			world.io.rmSync(scratchGit, { force: true });
 		},
 	});
-	await withDeadline(
-		trace,
-		"orchestration task turn",
-		session.prompt("Goal: set MAX_RETRIES to 5 in the limits file. Dispatch agents to confirm it and report back."),
-	);
+	await withDeadline(trace, "orchestration task turn", session.prompt(goalRequest));
 	trace.mark("root", "owner.task.settled");
 	session.setEdgeConfirmation(undefined);
 	expect(
@@ -683,7 +695,6 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	// worker completes; production refuses completion while the held lane is goal-owned and active, and after both workers are
 	// retired the still-open obligation alone refuses it. Each Vitest run checks the file value it reports on: the failing run
 	// sees a revision of 4, and the passing recheck follows a real edit back to 5.
-	const VITEST_COMMAND = "vitest run test/limits.test.ts";
 	const vitestFailed = ["Test Files  1 failed (1)\n", "Tests  1 failed (1)\n"];
 	const vitestPassed = ["Test Files  1 passed (1)\n", "Tests  1 passed (1)\n"];
 	// The same command run from another directory is a different verification identity: its pass must not clear the
@@ -828,6 +839,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	world.systemOne.enterPhase(
 		"verify-setup",
 		{
+			covered_0: { kind: "noul", probability: 0.97 },
 			...verifyJudgments,
 			...operationClasses,
 			...FILES_CHANGED_CLAIMS,
@@ -960,6 +972,13 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			name: "refusal-reported",
 			check: (request) => {
 				refusedGoal(request, "completion while the held lane runs", "goal-owned worker lane(s) are still active");
+				if (!world.systemOne.enabled)
+					refusedGoal(request, "the unchecked native requirement is open", "requirement(s) not satisfied");
+				refusedGoal(
+					request,
+					"the same refusal carries the unresolved check",
+					"active verification obligation(s) remain",
+				);
 			},
 			reply: { content: [{ type: "text", text: "Completion waits for the held check." }] },
 		},
@@ -1480,12 +1499,16 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		"the failed run is the one open verification obligation",
 	).toEqual([VITEST_COMMAND]);
 	// Every earlier tool pair is dropped from the context, the failed run included: the obligation must outlive its receipt.
-	world.systemOne.enterPhase("verify-checkpoint", checkpointJudgments, {
-		families: {
-			"keep_call::": { kind: "noul", probability: 0.02 },
-			"keep_result::": { kind: "noul", probability: 0.02 },
+	world.systemOne.enterPhase(
+		"verify-checkpoint",
+		{ ...checkpointJudgments, covered_0: { kind: "noul", probability: 0.97 } },
+		{
+			families: {
+				"keep_call::": { kind: "noul", probability: 0.02 },
+				"keep_result::": { kind: "noul", probability: 0.02 },
+			},
 		},
-	});
+	);
 	settlement.beforeCompact = settlementFacts(session, created.sessionManager, autonomy);
 	const checkpoint = await withDeadline(
 		trace,
@@ -1522,12 +1545,18 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	);
 	// Scripted before the reopen, in the order the root reaches them: the explicit refusal turn, then the goal's own idle
 	// continuation, which repairs the limit, rechecks it, and completes the goal (the natural stop of the loop).
+	const lateWrite = projectPath("src", "after-goal-completion.txt");
+	const completionReportReached = createBarrier();
+	let completionReportFailure: unknown;
 	const completeFinalCall = (callId: string) => {
 		const requirement = goalRequirementId();
 		const goal = session.getGoalStateSnapshot();
 		const evidence = goal?.evidence.find((item) => item.uri === "verify-pass-2");
 		const linkedRequirement = goal?.requirements.find((item) => item.id === requirement);
-		if (evidence?.verified !== true || !linkedRequirement?.evidenceIds.includes(evidence.id)) {
+		const linkedProof = world.systemOne.enabled
+			? linkedRequirement?.evidenceIds.includes(evidence?.id ?? "")
+			: linkedRequirement?.check?.command === VITEST_COMMAND;
+		if (evidence?.verified !== true || !linkedProof) {
 			throw new Error("the completion account has no verified current recheck linked to its requirement");
 		}
 		return [
@@ -1550,6 +1579,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 					},
 				},
 			},
+			{ id: "late-write-after-complete", name: "write", arguments: { path: lateWrite, content: "late" } },
 		];
 	};
 	world.provider.enqueue(
@@ -1612,6 +1642,21 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			},
 		]),
 		calls("vitest-recheck", [{ id: "verify-pass-2", name: "bash", arguments: { command: VITEST_COMMAND } }]),
+		...(!world.systemOne.enabled
+			? [
+					dynamicCalls("attach-native-proof-check", () => [
+						{
+							id: "native-proof-check",
+							name: "goal",
+							arguments: {
+								action: "set_requirement_check",
+								requirementId: goalRequirementId(),
+								check: { command: VITEST_COMMAND },
+							},
+						},
+					]),
+				]
+			: []),
 		calls("get-rechecked-goal", [{ id: "goal-get-recheck", name: "goal", arguments: { action: "get" } }]),
 		dynamicCalls(
 			"record-recheck-evidence",
@@ -1641,9 +1686,27 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		{
 			name: "completed",
 			check: (request) => {
-				assertBatchOk(request, "complete-final");
-				if (!latestBatchResults(request).some((result) => result.text.includes("goal complete recorded"))) {
-					throw new Error("the goal was not completed after the passing recheck cleared the obligation");
+				try {
+					const results = latestBatchResults(request);
+					expect(
+						request.context.tools ?? [],
+						`the final answer has no callable tools; completion receipts ${JSON.stringify(results)}; native spawns ${JSON.stringify(nativeProof?.spawned ?? [])}`,
+					).toHaveLength(0);
+					const completion = results.find((result) => result.toolName === "goal");
+					expect(completion?.text, "the rechecked completion reaches the provider as a goal receipt").toContain(
+						"goal complete recorded",
+					);
+					expect(completion?.text).toContain("Proof sheet");
+					expect(
+						results.find((result) => result.toolName === "write")?.isError,
+						"a sibling proposed after completion receives a refusal",
+					).toBe(true);
+					expect(world.io.existsSync(lateWrite), "the refused sibling never touched the checkout").toBe(false);
+				} catch (error) {
+					completionReportFailure = error;
+					throw error;
+				} finally {
+					completionReportReached.release();
 				}
 			},
 			reply: { content: [{ type: "text", text: "The goal is complete." }] },
@@ -1651,31 +1714,80 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	);
 	const checkpointFile = created.sessionManager.getSessionFile();
 	if (checkpointFile === undefined) throw new Error("the checkpointed session has no file");
-	// A process close, not an owner's abort: the request the goal took over stays handed to it across the reopen.
-	expect(
-		await world.disposeSessionInBody(session, { ordinaryWork: "preserve" }),
-		"the checkpointed root must dispose cleanly",
-	).toBeUndefined();
-	created = await world.createRootSession("root", { sessionManager: world.openSessionManager(checkpointFile) });
-	session = created.session;
-	orchestrationRoot = session;
-	session.subscribe((event) => {
-		if (event.type === "warning") warnings.push(event.message);
-	});
-	trace.mark("root", "checkpoint.reopened");
-	settlement.afterFreshOpen = settlementFacts(session, created.sessionManager, autonomy);
-	// The host resume the CLI performs on --resume, --continue and --session (main.ts): it restores the goal runtime and arms
-	// its idle continuation. Constructing the session alone does not. The scripted cycles then run the refusal, the repair,
-	// the recheck and the completion; the idle wait covers every cycle.
-	session.restoreGoalRuntimeAfterResume();
-	settlement.afterHostResume = settlementFacts(session, created.sessionManager, autonomy);
-	await withDeadline(trace, "auto-resumed goal settled", session.waitForForegroundIdle(), 90_000);
+	// Install the native check port before either root can yield to a pending continuation or terminal wake.
+	const nativeProof = world.systemOne.enabled ? undefined : scriptRequirementCheckSpawn(world, VITEST_COMMAND);
+	if (nativeProof)
+		world.shell.enqueue({
+			name: "native-goal-proof",
+			command: VITEST_COMMAND,
+			output: vitestPassed,
+			exitCode: 0,
+			check: () => limitsIs(5),
+		});
+	try {
+		// A process close preserves the work handed to the goal across the reopen.
+		expect(
+			await world.disposeSessionInBody(session, { ordinaryWork: "preserve" }),
+			"the checkpointed root must dispose cleanly",
+		).toBeUndefined();
+		created = await world.createRootSession("root", { sessionManager: world.openSessionManager(checkpointFile) });
+		session = created.session;
+		orchestrationRoot = session;
+		session.subscribe((event) => {
+			if (event.type === "warning") warnings.push(event.message);
+		});
+		trace.mark("root", "checkpoint.reopened");
+		settlement.afterFreshOpen = settlementFacts(session, created.sessionManager, autonomy);
+		// Restore the CLI's idle continuation; terminal wakes may already have started a turn during construction.
+		session.restoreGoalRuntimeAfterResume();
+		settlement.afterHostResume = settlementFacts(session, created.sessionManager, autonomy);
+		await withDeadline(
+			trace,
+			"checked completion reaches its final provider request",
+			completionReportReached.promise,
+			90_000,
+		);
+		await withDeadline(trace, "auto-resumed goal settled", session.waitForForegroundIdle(), 90_000);
+		if (completionReportFailure) throw completionReportFailure;
+	} finally {
+		nativeProof?.restore();
+	}
 	settlement.afterAutoResume = settlementFacts(session, created.sessionManager, autonomy);
 	trace.mark("root", "goal.completed");
+	expect(
+		session.messages.at(-1),
+		"the completing submission delivers its final answer before the next owner turn",
+	).toMatchObject({
+		role: "assistant",
+		stopReason: "stop",
+		content: expect.arrayContaining([{ type: "text", text: "The goal is complete." }]),
+	});
+	const completionReceipt = created.sessionManager
+		.getBranch()
+		.find(
+			(entry) =>
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				entry.message.toolCallId === "complete-2",
+		);
+	expect(
+		completionReceipt?.type === "message" ? completionReceipt.message : undefined,
+		"the exact completion call has a durable successful tool receipt before the next owner turn",
+	).toMatchObject({
+		role: "toolResult",
+		isError: false,
+		content: expect.arrayContaining([
+			expect.objectContaining({ type: "text", text: expect.stringContaining("goal complete recorded") }),
+		]),
+	});
 	expect(
 		session.getGoalStateSnapshot()?.status,
 		`the host records the goal as completed; native settlement: ${JSON.stringify(settlement)}`,
 	).toBe("completed");
+	if (nativeProof)
+		expect(session.getGoalStateSnapshot()?.evidence.some((item) => item.kind === "check" && item.verified)).toBe(
+			true,
+		);
 	if (world.systemOne.enabled) {
 		const accountRequests = world.systemOne.decoded.filter(
 			(request) => request.phase === "verify-checkpoint" && "shows_true_2" in request.questions,

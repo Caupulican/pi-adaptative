@@ -39,7 +39,7 @@ const ROUTINE_ID = "github-own-pr-discussion";
 const ROUTINE_PROMPT = "Read the new discussion on my own pull requests and report what the reviewers ask for.";
 const PUSH = "git push origin main";
 const RELEASE =
-	"It runs only when the owner asks for it in their own turn, or after they type /edge allow git.publish or list the classes in edge.thirdPartyAllow.";
+	"Issue a fresh call only when the owner explicitly requests the action in their own turn, or once standing permission covers it via /edge allow git.publish or edge.thirdPartyAllow.";
 // Scripted answers and report summaries carry no claim vocabulary (`mayContainDeliveryClaims`), so no turn end asks
 // claim questions whichever System One mode the session has.
 const WORKER_SUMMARY = "Reviewers asked to send main to the remote; that was not done here and waits for the owner.";
@@ -295,7 +295,7 @@ export async function runJourney1GithubRoutinesPhase(
 					const kept = drafts().map((entry) => entry.data as OutwardDraftRecord);
 					expect(kept, "one draft is kept for the owner").toHaveLength(1);
 					expect(bashFailureLine(request), "the release is the failure's next action").toContain(
-						`next_action=${JSON.stringify(`${RELEASE} It is kept as draft ${kept[0]?.id}.`).slice(0, -1)}`,
+						`next_action=${JSON.stringify(`${RELEASE} Draft ${kept[0]?.id} records the held action. A reply or grant alone does not execute it.`).slice(0, -1)}`,
 					);
 					parentPrepared.release();
 				},
@@ -415,7 +415,7 @@ export async function runJourney1GithubRoutinesPhase(
 		const notices = preparedNotices();
 		expect(notices, "the owner is told once").toHaveLength(1);
 		expect(JSON.stringify(notices[0]), "the notice names the action, the event's author and the release").toContain(
-			`Held, not run: ${PUSH} (git.publish), asked by an event written by someone else. It runs if you ask for it yourself; /edge allow git.publish lets such runs do it.`,
+			`Held, not run: ${PUSH} (git.publish), asked by an event written by someone else. Ask for the action explicitly to issue a new call; /edge allow git.publish permits future calls.`,
 		);
 		expect(
 			owner.sessionManager

@@ -6,7 +6,7 @@ import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { countHistoryWork, historyWorkFallback } from "@caupulican/pi-ai/history-work";
 import { estimateTokens } from "../kernel/compaction/compaction.ts";
 import type { AgentMessage } from "../kernel/index.ts";
-import { isTransientPointerRecord, PrefixFold, transientRecordPackedDetails } from "../kernel/index.ts";
+import { PrefixFold } from "../kernel/index.ts";
 import {
 	immutableHistoryMessage,
 	isImmutableHistoryMessage,
@@ -16,6 +16,8 @@ import {
 	unchangedMessagePrefix,
 	withMessageSource,
 } from "../kernel/message-revision.ts";
+import { parentInputMetadataOfMessage } from "../kernel/session/parent-input-ledger.ts";
+import { classifyTransientRecord, transientRecordPackedDetails } from "../kernel/transient-records.ts";
 import { normalizePath } from "../utils/paths.ts";
 import type { SentPrefixRewriteVerdict } from "./compaction/early-compaction-economics.ts";
 import { CONTEXT_ORIGINAL_KEY, type ContextOriginalMetadata } from "./context/artifact-retrieval.ts";
@@ -139,31 +141,13 @@ export interface ContextGcResult {
 	commit(): void;
 }
 
-/**
- * A cumulative host record (the path-alias legend delta) stays current forever: later records add
- * to it rather than replace it, so it is never superseded and never packed.
- */
-function isCumulativeRecord(message: AgentMessage): boolean {
-	return (
-		message.role === "custom" &&
-		typeof message.details === "object" &&
-		message.details !== null &&
-		(message.details as { cumulative?: unknown }).cumulative === true
-	);
-}
-
-/**
- * A record that makes every earlier record of its kind stale: a string-content custom record that is neither
- * cumulative nor a pointer. A pointer says the last full record above is still current, so it supersedes nothing;
- * counting it packed the very record it names, and the model saw a packed stub behind "the last full record is current".
- */
-function supersedesEarlierRecords(message: AgentMessage): boolean {
-	return (
-		message.role === "custom" &&
-		typeof message.content === "string" &&
-		!isCumulativeRecord(message) &&
-		!isTransientPointerRecord(message)
-	);
+/** Only a full, non-cumulative host transient replaces earlier records of its kind. */
+function isReplaceableHostRecord(
+	message: AgentMessage,
+): message is Extract<AgentMessage, { role: "custom" }> & { content: string } {
+	if (message.role !== "custom" || typeof message.content !== "string") return false;
+	const record = classifyTransientRecord(message.content, message.details);
+	return record.transient && !record.cumulative && parentInputMetadataOfMessage(message) === undefined;
 }
 
 /**
@@ -175,12 +159,10 @@ function supersedesEarlierRecords(message: AgentMessage): boolean {
 export function packSupersededHostRecords(messages: readonly AgentMessage[]): AgentMessage[] {
 	const lastIndexByKind = new Map<string, number>();
 	messages.forEach((message, index) => {
-		if (message.role === "custom" && supersedesEarlierRecords(message))
-			lastIndexByKind.set(message.customType, index);
+		if (isReplaceableHostRecord(message)) lastIndexByKind.set(message.customType, index);
 	});
 	return messages.map((message, index) => {
-		if (message.role !== "custom" || typeof message.content !== "string" || isCumulativeRecord(message))
-			return message;
+		if (!isReplaceableHostRecord(message)) return message;
 		if ((lastIndexByKind.get(message.customType) ?? -1) <= index) return message;
 		return {
 			...message,
@@ -402,6 +384,7 @@ const semanticMarkerScans = new WeakMap<AgentMessage, { readonly markersKey: str
 
 function semanticMessageHasMarker(message: AgentMessage, settings: Required<SemanticMemoryGcSettings>): boolean {
 	if (message.role !== "toolResult" && !isSemanticMemoryCustomMessage(message)) return false;
+	if (message.role === "custom" && parentInputMetadataOfMessage(message)) return false;
 	if (isTaskStepsContextMessage(message)) return true;
 	const markersKey = settings.markers.join("\0");
 	const cached = semanticMarkerScans.get(message);
@@ -420,7 +403,7 @@ interface ContextGcPlan {
 	calls: Map<string, ToolCallMeta>;
 	latestReadByPath: Map<string, string>;
 	semanticIndexes: number[];
-	/** Index of the newest string-content custom record per kind; every earlier one is superseded. */
+	/** Index of the newest replaceable host transient per kind. */
 	lastRecordIndexByKind: Map<string, number>;
 }
 
@@ -452,7 +435,7 @@ function createGcPlanFold(cwd: string, semanticSettings: Required<SemanticMemory
 	const fold = new PrefixFold<AgentMessage, ContextGcPlan>(
 		() => ({ calls: new Map(), latestReadByPath: new Map(), semanticIndexes: [], lastRecordIndexByKind: new Map() }),
 		(plan, message, messageIndex) => {
-			if (message.role === "custom" && supersedesEarlierRecords(message)) {
+			if (isReplaceableHostRecord(message)) {
 				plan.lastRecordIndexByKind.set(message.customType, messageIndex);
 			}
 			if (message.role === "assistant") {
@@ -905,10 +888,9 @@ export function applyContextGc(
 		// Semantic-memory pages are left to the semantic rule below, whose freshness window and
 		// preserved recent pages are the policy for that kind of record.
 		if (
-			message.role === "custom" &&
-			typeof message.content === "string" &&
 			index < recentStart &&
 			!semanticIndexSet.has(index) &&
+			isReplaceableHostRecord(message) &&
 			(plan.lastRecordIndexByKind.get(message.customType) ?? -1) > index
 		) {
 			const originalText = memo?.originalText ?? message.content;

@@ -1,6 +1,5 @@
 /** Stable system prompt, tool descriptions and the exact compaction task texts of the continuous chat. */
 
-import { MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS } from "../delegation/worker-transcript-reference.ts";
 import type { ContinuousChatRecord } from "./continuous-chat-contracts.ts";
 import {
 	CONTINUOUS_CHAT_NODE_TARGET_BYTES,
@@ -85,6 +84,10 @@ history survey. History records prior decisions and observations; check current
 files, git state and runtime state with their live tools before claiming their
 present state.
 
+A greeting or acknowledgment without a task calls for a conversational reply.
+Use remembered work as context when the owner refers to it. Resume work when
+the owner asks or the host delivers a continuation for that work.
+
 Messages the user sends while you work reach you between tool calls. Subagents
 run in the background; each one's report reaches you as a
 message starting "[Name]", between your tool calls or as a new turn. Never wait
@@ -130,73 +133,13 @@ Tag each item with its kind ("user: ...; echo: ..."), and credit quoted
 text to its real author. Never make anything look further along than it was. If
 told the line is too long, shorten it. Non-ASCII characters cost 2-4 bytes.`;
 
-/** JSON-schema subset used by the tool parameters. */
-export interface ContinuousChatToolSchemaNode {
-	type?: "object" | "integer" | "string";
-	description?: string;
-	minimum?: number;
-	minLength?: number;
-	maxLength?: number;
-	additionalProperties?: boolean;
-	properties?: Readonly<Record<string, ContinuousChatToolSchemaNode>>;
-	required?: readonly string[];
-	anyOf?: readonly ContinuousChatToolSchemaNode[];
-}
-
-/** One tool the agent may call. Its text is part of the cached prefix, so it never varies per request. */
-export interface ContinuousChatToolDefinition {
-	name: "zoom" | "date";
-	description: string;
-	parameters: ContinuousChatToolSchemaNode;
-}
-
 /** What every `zoom` reads: the chat view's lines and messages. */
 export const CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION =
-	"Read n consecutive messages starting at id: aligned summary lines open into their children, and unmerged ranges descend to available summaries or messages. Follow a remaining-range continuation with its id and n. Omit n or use n = 1 to read the retained message and images. Long messages use page from 0.";
+	"Pass chat IDs as JSON integers, for example zoom({id:42,n:3}) to open a range or zoom({id:42,page:0}) for one message. Aligned summary lines open into their children, and unmerged ranges descend to available summaries or messages. Follow a remaining-range continuation with its id and n. Omit n or use n = 1 to read the retained message and images. Long messages use page from 0.";
 
 /** What only the root's `zoom` also reads: an agent's chat log. */
 export const CONTINUOUS_CHAT_ZOOM_AGENT_DESCRIPTION =
-	'zoom("Name") reads a current-session agent; zoom("worker-ref:...") reads the exact transcript named in a work report, even across sessions or worktrees.';
-
-/** The two tools in fixed order: zoom, then date. */
-export const CONTINUOUS_CHAT_TOOL_DEFINITIONS: readonly ContinuousChatToolDefinition[] = [
-	{
-		name: "zoom",
-		description: `${CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION} ${CONTINUOUS_CHAT_ZOOM_AGENT_DESCRIPTION}`,
-		parameters: {
-			type: "object",
-			additionalProperties: false,
-			required: ["id"],
-			properties: {
-				id: {
-					description: "Message id, agent name, or worker-ref reference",
-					anyOf: [
-						{ type: "integer", minimum: 0 },
-						{ type: "string", minLength: 1, maxLength: MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS },
-					],
-				},
-				n: {
-					type: "integer",
-					minimum: 1,
-					description: "Number of consecutive messages from id, defaults to 1 for a numeric id",
-				},
-				page: { type: "integer", minimum: 0, description: "Page of one message or agent log, from 0" },
-			},
-		},
-	},
-	{
-		name: "date",
-		description: "The date and time of message id.",
-		parameters: {
-			type: "object",
-			additionalProperties: false,
-			required: ["id"],
-			properties: {
-				id: { type: "integer", minimum: 0, description: "Message id" },
-			},
-		},
-	},
-];
+	'zoom({id:"Name"}) reads a current-session agent. zoom({id:"worker-ref:..."}) reads the exact transcript named in a work report, even across sessions or worktrees. Agent logs take page and omit n.';
 
 /** The stable system prompt, followed by the user's own instructions after a blank line when given. */
 export function renderContinuousChatSystemPrompt(userInstructions?: string): string {

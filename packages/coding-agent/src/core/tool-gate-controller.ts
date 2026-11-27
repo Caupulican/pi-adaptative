@@ -110,6 +110,8 @@ function existingObservationCwd(targetDirectory: string): string {
 }
 
 export interface ToolGateControllerDeps {
+	/** Whether the current owner input requests any task work. */
+	currentRequestWorkRefusal?(): string | undefined;
 	/**
 	 * Execution permission mode. YOLO skips the permission checks (envelope, acquisition, extension
 	 * vetoes, script authorization, edge prompts, System One review) and keeps self-regulation: context
@@ -145,6 +147,7 @@ export interface ToolGateControllerDeps {
 		signal: AbortSignal | undefined,
 		/** What a sub-call is made for, named to the operator and kept with a draft if the call is held. */
 		purpose?: NestedCallPurpose,
+		registerStart?: (start: () => void) => void,
 	): Promise<BeforeToolCallResult | undefined>;
 	/**
 	 * Soul gate of a root session: `checkWrite` screens and has System One review the root agent's write or edit of
@@ -409,6 +412,8 @@ export class ToolGateController {
 		signal,
 	) => {
 		signal?.throwIfAborted();
+		const requestRefusal = this.deps.currentRequestWorkRefusal?.();
+		if (requestRefusal) return blockedCall(toolCall.name, "owner_request", { block: true, reason: requestRefusal });
 		await this.deps.settleOwnerPolicy?.(signal);
 		signal?.throwIfAborted();
 		const yolo = this.deps.getExecutionMode?.() === "yolo" && this.deps.runsGuardedRemoteOwner?.() !== true;
@@ -521,7 +526,14 @@ export class ToolGateController {
 
 			// 4. Single edge authorization on the actual final operation
 			const purpose = this.nestedPurposes.get(toolCall);
-			const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal, purpose);
+			const edge = await this.deps.checkEdge?.(
+				toolCall.name,
+				args,
+				executionContext?.cwd,
+				signal,
+				purpose,
+				registerStart,
+			);
 			if (edge) return blockedCall(toolCall.name, "edge", edge);
 			const delegation = await this.deps.checkDelegation?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (delegation) return blockedCall(toolCall.name, "delegation", delegation);
