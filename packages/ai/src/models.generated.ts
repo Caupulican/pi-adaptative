@@ -13822,7 +13822,7 @@ export const MODELS: Readonly<Record<string, Readonly<Record<string, Model<Api>>
 				cacheWrite: 2.5,
 				tiers: [{"inputTokensAbove":272000,"input":4,"output":15,"cacheRead":0.2,"cacheWrite":5}],
 			},
-			contextWindow: 272000,
+			contextWindow: 500000,
 			maxTokens: 128000,
 		} satisfies Model<"openai-codex-responses">,
 		"gpt-6.1-terra": {
@@ -13857,7 +13857,7 @@ export const MODELS: Readonly<Record<string, Readonly<Record<string, Model<Api>>
 			defaultThinkingLevel: "low",
 			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max","ultra":"xhigh"},
 			openaiResponsesLite: true,
-			serviceTiers: [{"id":"priority","name":"Fast","description":"2x speed, increased usage"},{"id":"ultrafast","name":"Ultrafast","description":"The fastest available responses for latency-sensitive work."}],
+			serviceTiers: [{"id":"priority","name":"Fast","description":"2x speed, increased usage"}],
 			input: ["text", "image"],
 			cost: {
 				input: 8,
@@ -13879,7 +13879,7 @@ export const MODELS: Readonly<Record<string, Readonly<Record<string, Model<Api>>
 			defaultThinkingLevel: "low",
 			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max","ultra":"xhigh"},
 			openaiResponsesLite: true,
-			serviceTiers: [{"id":"priority","name":"Fast","description":"2x speed, increased usage"},{"id":"ultrafast","name":"Ultrafast","description":"The fastest available responses for latency-sensitive work."}],
+			serviceTiers: [{"id":"priority","name":"Fast","description":"2x speed, increased usage"}],
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -17335,8 +17335,8 @@ export const MODELS: Readonly<Record<string, Readonly<Record<string, Model<Api>>
 			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"xhigh","max":null},
 			input: ["text"],
 			cost: {
-				input: 0.797534,
-				output: 1.5381,
+				input: 0.79613,
+				output: 1.5712,
 				cacheRead: 0.2,
 				cacheWrite: 0,
 			},

@@ -197,7 +197,7 @@ export async function consumeOpenAICodexRateLimitResetCredit(
  * It is the client release recorded in scripts/data/codex-models.json (scripts/sync-codex-models.ts).
  * The catalogue can include newer upstream commits while retaining a released client identity.
  */
-export const OPENAI_CODEX_CLIENT_VERSION = "0.171.0-alpha.12";
+export const OPENAI_CODEX_CLIENT_VERSION = "0.174.0-alpha.8";
 
 export interface OpenAICodexAccessPrograms {
 	cyber: readonly OpenAICodexCyberAccessProgram[];

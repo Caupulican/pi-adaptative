@@ -1,3 +1,3 @@
 {
-	"o1": "models.dev no longer lists o1 for any provider (checked 2026-11-27). The repo still names it only as the o-series family prefix in expert routing (custom deployments may still carry the id) and as a TypeScript variable in a tsc output fixture. Neither reads the catalog."
+	"o1": "No provider pi generates lists o1 any more (models.dev, OpenRouter and Vercel AI Gateway, checked 2026-11-27). The repo still names it only as the o-series family prefix in expert routing (custom deployments may still carry the id) and as a TypeScript variable in a tsc output fixture. Neither reads the catalog."
 }
