@@ -2,7 +2,7 @@
 
 Sign in with `/login` and select **Google Antigravity**. Pi discovers the models available to that account; it does not add models the account cannot access. Select an advertised `gemini-4-argon-low`, `gemini-4-argon-medium`, or `gemini-4-argon-high` model with `/model`.
 
-Pi uses the consumer sign-in flow reviewed against AGY 1.5.15. After signing in, paste the authorization code shown on the Antigravity page, or paste the complete callback URL from that login, including its `state` parameter. Pi submits the matching PKCE verifier when it exchanges the code.
+Pi uses the consumer sign-in flow reviewed against AGY 1.5.18. After signing in, paste the authorization code shown on the Antigravity page, or paste the complete callback URL from that login, including its `state` parameter. Pi submits the matching PKCE verifier when it exchanges the code.
 
 Each variant uses its catalog thinking level. Selecting a different reasoning effort does not override a fixed variant; select the corresponding model instead. If the account advertises an unpreset `gemini-4-argon`, it supports Low, Medium, and High, with Medium as the default. Argon uses thinking levels rather than thinking-token budgets, and Pi omits its unsupported temperature parameter.
 

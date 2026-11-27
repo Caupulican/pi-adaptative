@@ -3,7 +3,8 @@
 ### Changed
 
 - Refreshed the generated provider model catalog from live sources. New entries include Claude Haiku 5.5 and Sonnet 5.5 Canada profiles and Kimi K3/K3.1 India profiles on Amazon Bedrock, Gemini 4 Neon Fast on Vercel AI Gateway, OpenAI healthcare variants, and new Fireworks, Hugging Face, Together and OpenRouter models. Models the sources no longer offer were removed, including OpenAI `gpt-4`, `o1`, `o1-pro`, `o3-mini` and `o4-mini`, and several Cloudflare Workers AI models.
-- OpenAI Codex models now follow the Codex 0.174.0-alpha.8 catalogue, and requests report that client version. GPT-6.1-Sol advertises a 500K context window. Ultrafast now comes only from the account's live model listing.
+- OpenAI Codex models now follow the Codex 0.174.0-alpha.8 catalogue, and requests report that client version. GPT-6.1-Sol advertises a 500K context window. The 0.174 catalogue no longer lists Ultrafast for GPT-6.2 Sol and Astra, so Pi offers it only when the account's model listing does.
+- Antigravity requests now identify as AGY 1.5.18. Its sign-in, callback, scopes and token persistence are unchanged for Pi; the native saved-token source only adds a nil-token guard and returns a copy of the token.
 - Command Code requests now identify as client 1.93.4. Its sign-in, request headers, routes and model catalogue are unchanged from 1.93.2.
 
 ## [0.105.2] - 2026-11-27
