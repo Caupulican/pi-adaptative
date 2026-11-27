@@ -276,7 +276,10 @@ it("retries an interrupted parent wake after an unrelated assistant answer and s
 		expect(canonical.map((row) => row.role)).toEqual(expect.arrayContaining(["compactionSummary", "branchSummary"]));
 		const plan = await project();
 		const wire = convertToLlm(plan.messages);
-		expect(wire.at(-1)).toMatchObject({ role: "user", content: parentWakeContent(wake.wakeId, wake.inputs) });
+		expect(wire.at(-1)).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: parentWakeContent(wake.wakeId, wake.inputs) }],
+		});
 		expect(JSON.stringify(wire)).toContain(content);
 		expect(JSON.stringify(wire)).not.toMatch(
 			/Separate owner question|Separate (?:branch|compaction) handoff|Answer to the owner's separate question|Provider rejected the request/,
