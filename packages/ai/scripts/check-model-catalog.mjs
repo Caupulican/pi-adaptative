@@ -29,6 +29,13 @@ const repoRoot = resolve(packageRoot, "..", "..");
 // never written, the run fails and a person decides.
 const WRITE = process.argv.includes("--write");
 
+// A removal a person has reviewed: the id is gone upstream and its remaining mentions in the repo do not read the
+// catalog (a family prefix, a fixture identifier). Each entry maps the id to the reason, and it only affects a run in
+// which that id is being removed.
+const ACCEPTED_REMOVALS = JSON.parse(
+	readFileSync(join(packageRoot, "scripts", "data", "model-catalog-accepted-removals.json"), "utf8"),
+);
+
 const CATALOGS = [
 	{
 		label: "models.generated.ts",
@@ -169,7 +176,11 @@ async function checkCatalog(catalog) {
 			console.error("  Model id set is unchanged; pricing/metadata fields differ (e.g. cost, context window).");
 		}
 
-		const criticalRemovals = findReferencedModelIds(removedIds);
+		const acceptedRemovals = removedIds.filter((id) => Object.hasOwn(ACCEPTED_REMOVALS, id));
+		for (const id of acceptedRemovals) {
+			console.error(`  Reviewed removal: ${id} (${ACCEPTED_REMOVALS[id]})`);
+		}
+		const criticalRemovals = findReferencedModelIds(removedIds.filter((id) => !acceptedRemovals.includes(id)));
 		if (criticalRemovals.length > 0) {
 			console.error("");
 			console.error(`  CRITICAL: the following removed model id(s) are still referenced elsewhere in the repo:`);

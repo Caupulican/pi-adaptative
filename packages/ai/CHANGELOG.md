@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Changed
+
+- Refreshed the generated provider model catalog from live sources. New entries include Claude Haiku 5.5 and Sonnet 5.5 Canada profiles and Kimi K3/K3.1 India profiles on Amazon Bedrock, Gemini 4 Neon Fast on Vercel AI Gateway, OpenAI healthcare variants, and new Fireworks, Hugging Face, Together and OpenRouter models. Models the sources no longer offer were removed, including OpenAI `gpt-4`, `o1`, `o1-pro`, `o3-mini` and `o4-mini`, and several Cloudflare Workers AI models.
+- Command Code requests now identify as client 1.93.4. Its sign-in, request headers, routes and model catalogue are unchanged from 1.93.2.
+
 ## [0.105.2] - 2026-11-27
 
 ## [0.105.1] - 2026-11-25

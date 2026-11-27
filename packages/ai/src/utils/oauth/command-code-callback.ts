@@ -98,7 +98,7 @@ function closeServer(server: Server): Promise<void> {
 	});
 }
 
-/** Start the native 1.93.2 callback contract on an ephemeral strict-loopback port. */
+/** Start the native 1.93.4 callback contract on an ephemeral strict-loopback port. */
 export async function startCommandCodeCallback(
 	expectedState: string,
 	signal?: AbortSignal,

@@ -538,7 +538,7 @@ For fine-grained control, use the provider-specific options:
 ```typescript
 import { getModel, complete } from '@caupulican/pi-ai';
 
-// OpenAI Reasoning (o1, o3, gpt-5)
+// OpenAI Reasoning (o3, gpt-5)
 const openaiModel = getModel('openai', 'gpt-5-mini');
 await complete(openaiModel, context, {
   reasoningEffort: 'medium',

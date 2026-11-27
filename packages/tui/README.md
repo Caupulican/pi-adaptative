@@ -479,7 +479,7 @@ interface SettingsListTheme {
 const settings = new SettingsList(
   [
     { id: "theme", label: "Theme", currentValue: "dark", values: ["dark", "light"] },
-    { id: "model", label: "Model", currentValue: "gpt-4", submenu: (val, done) => modelSelector },
+    { id: "model", label: "Model", currentValue: "gpt-5.5", submenu: (val, done) => modelSelector },
   ],
   10,      // maxVisible
   theme,   // SettingsListTheme

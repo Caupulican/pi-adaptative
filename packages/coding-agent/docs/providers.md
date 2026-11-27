@@ -227,7 +227,7 @@ export AZURE_OPENAI_RESOURCE_NAME=your-resource
 
 # Optional
 export AZURE_OPENAI_API_VERSION=2024-02-01
-export AZURE_OPENAI_DEPLOYMENT_NAME_MAP=gpt-4=my-gpt4,gpt-4o=my-gpt4o
+export AZURE_OPENAI_DEPLOYMENT_NAME_MAP=gpt-5.5=my-gpt55,gpt-4o=my-gpt4o
 ```
 
 ### Amazon Bedrock
@@ -338,7 +338,7 @@ For normal pi usage, prefer unified billing or stored BYOK. Inline BYOK requires
 ```bash
 export CLOUDFLARE_API_KEY=...           # or use /login
 export CLOUDFLARE_ACCOUNT_ID=...
-pi --provider cloudflare-workers-ai --model "@cf/moonshotai/kimi-k2.6"
+pi --provider cloudflare-workers-ai --model "@cf/zai-org/glm-5.3"
 ```
 
 Pi automatically sets `x-session-affinity` for [prefix caching](https://developers.cloudflare.com/workers-ai/features/prompt-caching/) discounts.

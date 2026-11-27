@@ -1,4 +1,4 @@
-/** Regression coverage for Command Code 1.93.2 browser handoff, legacy JSON, and manual-key competition. */
+/** Regression coverage for Command Code 1.93.4 browser handoff, legacy JSON, and manual-key competition. */
 
 import { request as httpRequest } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
